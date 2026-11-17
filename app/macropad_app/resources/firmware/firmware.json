@@ -1,0 +1,26 @@
+{
+  "version": "2.0.0",
+  "chip": "esp32s3",
+  "parts": [
+    {
+      "offset": "0x0",
+      "file": "bootloader.bin",
+      "sha256": "84bb365666003b051f564d04380d0cf5d9d85c420ddafe9fc863071b49e49bfc"
+    },
+    {
+      "offset": "0x8000",
+      "file": "partitions.bin",
+      "sha256": "148b959cbff1c38aa8e1d5c0ba9d612c54997b945e56a63f41223eef650653a1"
+    },
+    {
+      "offset": "0xe000",
+      "file": "boot_app0.bin",
+      "sha256": "f94c5d786a7a8fab06ac5d10e33bf37711a6697636dc037559ea19cc410a17f0"
+    },
+    {
+      "offset": "0x10000",
+      "file": "app.bin",
+      "sha256": "a8cbbfefed157cffa101c706bf250932f671383e31ba371c1b6f93f72d210bf9"
+    }
+  ]
+}
