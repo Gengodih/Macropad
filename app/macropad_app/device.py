@@ -78,6 +78,10 @@ class _Control:
     result: object = None
 
 
+class _Cancelled(Exception):
+    pass
+
+
 class PadLink(QObject):
     status_changed = Signal(str)
     info_received = Signal(object)            # protocol.PadInfo, or None for an old firmware
@@ -87,6 +91,10 @@ class PadLink(QObject):
     port_changed = Signal(str)
     music_state = Signal(bool, str)           # music info available?, reason if not
     music_level = Signal(float)               # loudness 0-1, about 25 a second while music plays
+    key_event = Signal(int, bool, bool, bool)  # key, pressed?, layer 2?, done by the app?
+    mic_muted = Signal(object)                # True / False / None (no microphone), when it changes
+    picture_progress = Signal(int, int)       # bytes sent, total
+    picture_done = Signal(bool, str)          # ok, reason ("same" = the pad had it already)
 
     def __init__(self, knob_app_volume=True, player="auto"):
         super().__init__()
@@ -99,6 +107,10 @@ class PadLink(QObject):
         self._player = player
         self.port = ""
         self.info = None
+        self._mic = None
+        self._mic_checked = 0.0
+        self._mic_state = "unknown"
+        self._picture_cancel = threading.Event()
 
     # ----- called from the window (any thread) -------------------------------
     def start(self):
@@ -116,6 +128,22 @@ class PadLink(QObject):
     def apply(self, lines):
         """Send settings (list of protocol lines) and save them on the pad."""
         self._requests.put(_Control("apply", list(lines)))
+
+    def send(self, lines):
+        """Messages that are not settings (profile, key lights, keys for macros ...).
+        Dropped when no pad is connected."""
+        self._requests.put(_Control("send", list(lines)))
+
+    def upload_picture(self, pic):
+        """Send the own picture to the pad (only if it has a different one)."""
+        self._picture_cancel.clear()
+        self._requests.put(_Control("picture", pic))
+
+    def cancel_picture(self):
+        self._picture_cancel.set()
+
+    def toggle_mic(self):
+        self._requests.put(_Control("mic"))
 
     def set_knob_target(self, app_volume: bool):
         self._requests.put(_Control("knob", bool(app_volume)))
@@ -190,6 +218,26 @@ class PadLink(QObject):
                     self.apply_finished.emit(False, "not connected")
                 else:
                     pending.append(ApplyRequest(c.payload))
+            elif c.kind == "send":
+                if ser is not None:
+                    for line in c.payload:
+                        ser.write(line)
+            elif c.kind == "picture":
+                if ser is None:
+                    self.picture_done.emit(False, "not connected")
+                else:
+                    try:
+                        self._upload_picture(ser, c.payload)
+                    except (serial.SerialException, OSError) as e:   # unplugged: the session ends
+                        self.picture_done.emit(False, str(e))
+                        raise
+                    except Exception as e:
+                        log.info("Picture upload failed: %s", e)
+                        self.picture_done.emit(False, str(e))
+            elif c.kind == "mic":
+                if self._mic is not None:
+                    self._mic.toggle()
+                    self._mic_checked = 0.0          # report the new state right away
             elif c.kind == "knob":
                 self._knob_app_volume = c.payload
                 if music is not None:
@@ -270,6 +318,55 @@ class PadLink(QObject):
             await asyncio.sleep(0.5)
         self._set_status(STATUS_DISCONNECTED)
 
+    def _upload_picture(self, ser, pic):
+        """IP? -> IB -> IR, then IC parts -> IK each, IE|crc -> IA. Runs inside the session."""
+        buf = b""
+
+        def wait_for(prefix, timeout):
+            nonlocal buf
+            end = time.monotonic() + timeout
+            while time.monotonic() < end:
+                if self._picture_cancel.is_set() or self._stop.is_set():
+                    raise _Cancelled()
+                data = ser.read(ser.in_waiting or 1)
+                if data:
+                    buf += data
+                while b"\n" in buf:
+                    raw, buf = buf.split(b"\n", 1)
+                    msg = raw.decode("ascii", "ignore").strip()
+                    if msg.startswith(prefix):
+                        return msg
+                    if msg.startswith("IA|0"):
+                        raise RuntimeError(msg[5:] or "the pad refused the picture")
+                    press = protocol.parse_press(msg) if msg.startswith("P|") else None
+                    if press:
+                        self.key_event.emit(*press)
+            raise RuntimeError("the pad did not answer")
+
+        total = len(pic.data)
+        try:
+            ser.write(b"IP\n")
+            have = wait_for("IP|", 3).split("|")
+            if len(have) == 3 and have[1] == str(pic.crc) and have[2] == str(pic.frames):
+                self.picture_done.emit(True, "same")
+                return
+            ser.write(f"IB|{pic.w}|{pic.h}|{pic.frames}|{pic.delay_ms}|{total}\n".encode())
+            wait_for("IR", 40)                    # the pad erases its picture area first
+            sent = 0
+            while sent < total:
+                part = pic.data[sent:sent + 4096]
+                ser.write(f"IC|{sent}|{len(part)}\n".encode() + part)
+                ack = wait_for("IK|", 5).split("|")
+                if len(ack) != 3 or ack[1] != str(sent) or ack[2] != "1":
+                    raise RuntimeError("writing to the pad failed")
+                sent += len(part)
+                self.picture_progress.emit(sent, total)
+            ser.write(f"IE|{pic.crc}\n".encode())
+            wait_for("IA|1", 30)
+            self.picture_done.emit(True, "")
+        except _Cancelled:
+            self.picture_done.emit(False, "cancelled")
+
     async def _session(self, ser, music):
         from . import media  # only for CoverSender / handle_message / timing constants
         covers = media.CoverSender() if music is not None else None
@@ -279,6 +376,8 @@ class PadLink(QObject):
         buffer = b""
         last_sent = last_level = 0.0
         last_track = None
+        self._mic = media.MicVolume() if music is not None else None
+        self._mic_state = "unknown"
         info_asked = time.monotonic()
         ser.write(protocol.INFO_REQUEST)
         got_info = False
@@ -303,7 +402,9 @@ class PadLink(QObject):
                             if info:
                                 got_info = True
                                 self.info = info
-                                if info.protocol >= 2:   # the date, for the "Seasons" background
+                                if info.protocol >= 4:   # date and time: Seasons background, clock
+                                    ser.write(protocol.month_line(time.localtime().tm_mon, protocol.local_epoch()))
+                                elif info.protocol >= 2:   # the date, for the "Seasons" background
                                     ser.write(protocol.month_line(time.localtime().tm_mon))
                                 self.info_received.emit(info)
                         elif msg.startswith("A|W|") and current is not None:
@@ -320,6 +421,10 @@ class PadLink(QObject):
                         elif msg.startswith("A|E|"):
                             errors.append(msg[4:])
                             log.info("Pad did not understand: %s", msg[4:])
+                        elif msg.startswith("P|"):
+                            press = protocol.parse_press(msg)
+                            if press:
+                                self.key_event.emit(*press)
                         elif msg.startswith("X|"):
                             x = protocol.parse_lights(msg)
                             if x:
@@ -374,6 +479,12 @@ class PadLink(QObject):
                     else:
                         ser.write(KEEPALIVE)
                     last_sent = now
+                if self._mic is not None and now - self._mic_checked >= 0.4:
+                    self._mic_checked = now
+                    state = self._mic.muted()
+                    if state != self._mic_state:
+                        self._mic_state = state
+                        self.mic_muted.emit(state)
                 if music is not None and music.playing and now - last_level >= media.LEVEL_EVERY:
                     level = round(min(1.0, music.volume.peak() * media.LEVEL_GAIN) * 100)
                     ser.write(f"L|{level}\n".encode("ascii"))

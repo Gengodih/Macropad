@@ -45,6 +45,7 @@ def _selftest():
         t.join(30)
         if sys.platform == "win32" and not state.get("ok"):
             raise RuntimeError(f"music libraries missing in the build: {state.get('why')}")
+        import psutil  # noqa: F401  (PC stats widget, must be inside the build)
         from . import bgfx
         if sys.platform == "win32" and not bgfx.available():
             raise RuntimeError("background renderer (bgfx.dll) missing in the build")

@@ -21,9 +21,12 @@ LANGS = ("en", "de")
 EFFECTS = ("static", "breathe", "glow")       # own light schemes (FX_* in the firmware)
 # Animated screen backgrounds, in catalog order. PAD_BACKGROUND = their number
 # on the pad (BG_* in the firmware); 1 there is "plain" = animation switched off.
-BACKGROUNDS = ("aquarium", "synthwave", "lava", "space", "fire", "matrix", "rain", "seasons")
+BACKGROUNDS = ("aquarium", "synthwave", "lava", "space", "fire", "matrix", "rain", "seasons",
+               "clock", "stats", "timer", "picture")
+WIDGETS = ("clock", "stats", "timer", "picture")      # shown as their own group in the catalog
 PAD_BACKGROUND = {"aquarium": 0, "synthwave": 2, "lava": 3, "space": 4, "fire": 5, "matrix": 6,
-                  "rain": 7, "seasons": 8}
+                  "rain": 7, "seasons": 8, "clock": 9, "stats": 10, "timer": 11, "picture": 12}
+MIN_PROTO = {"clock": 4, "stats": 4, "timer": 4, "picture": 4}   # older pads show the aquarium instead
 PAD_PLAIN = 1
 SEASONS = ("auto", "winter", "spring", "summer", "autumn")
 # The options of each background and their defaults (the same order as the
@@ -37,13 +40,23 @@ BACKGROUND_OPTIONS = {
     "matrix": {"key_names": True},
     "rain": {"storm": True},
     "seasons": {"season": "auto"},
+    "clock": {"seconds": True, "h12": False},
+    "stats": {"graph": True},
+    "timer": {"focus": 25, "break": 5, "long": 15},   # minutes
+    "picture": {"fit": False},                          # False = fill the screen (cut edges), True = whole picture
 }
+TIMER_LIMITS = {"focus": (1, 120), "break": (1, 60), "long": (1, 60)}
 KNOB_TARGETS = ("pc", "app")
 MAX_SCHEMES = 10
 BUILTIN_MODES = 6                             # Rainbow ... One colour (Off is mode 6)
 MODE_OFF = 6
 MODE_CUSTOM = 7                               # own scheme n = mode 7 + n
 COLOUR_COUNT = 16
+MAX_MACROS = 30
+MAX_STEPS = 40
+MAX_PROFILES = 10
+STEP_TYPES = ("keys", "text", "open", "delay")
+IDLE_CHOICES = (0, 5, 10, 15, 30, 60)          # minutes without a key until the pad sleeps (0 = never)
 _HEX = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 DEFAULT_SCHEME_COLOURS = ["#7c3aed"] * keys.KEY_COUNT
@@ -53,6 +66,16 @@ DEFAULTS = {
     "app_language": "en",
     "pad_language": "en",
     "keys": list(keys.DEFAULT_LAYOUT),
+    "keys2": ["none"] * keys.KEY_COUNT,   # layer 2 (while a "layer" key is held)
+    # own macros: id -> {"name": str, "steps": [{"type": "keys", "action": id} |
+    #   {"type": "text", "text": str} | {"type": "open", "target": str} | {"type": "delay", "ms": int}]}
+    "macros": {},
+    # tap / hold / double-tap keys: id -> {"name": str, "tap": id, "hold": id, "double": id}
+    "multi": {},
+    # profiles: the keys change by themselves while one of these programs is in front
+    "profiles": [],                # [{"name": str, "programs": ["photoshop.exe"], "keys": [15 ids]}]
+    "owner_name": "",              # for the pad's welcome
+    "sleep": {"when_locked": True, "idle_minutes": 0},
     "knob_target": "app",          # the app design: knob = music app's volume / mute
     "player": "auto",              # auto, spotify, deezer
     "lights": {
@@ -107,6 +130,86 @@ def clean_text(text, limit) -> str:
     return text[:limit]
 
 
+def clean_program(name) -> str:
+    """'C:\\Apps\\Photoshop.EXE' or 'photoshop' -> 'photoshop.exe'."""
+    if not isinstance(name, str):
+        return ""
+    name = name.replace("/", "\\").rsplit("\\", 1)[-1].strip().lower()
+    if name and "." not in name:
+        name += ".exe"
+    return name if re.match(r"^[\w .()+\-]{1,80}$", name) else ""
+
+
+def action_ok(settings, aid) -> bool:
+    """Valid action that also exists (a macro or tap/hold key must be in the settings)."""
+    if not keys.is_valid(aid):
+        return False
+    if keys.is_ref(aid):
+        kind, rid = aid.split(":", 1)
+        return rid in settings.get("macros" if kind == "macro" else "multi", {})
+    return True
+
+
+def action_names(settings) -> dict:
+    """{action id: name} for the macros and tap/hold keys (for labels)."""
+    names = {f"macro:{rid}": m["name"] for rid, m in settings.get("macros", {}).items()}
+    names.update({f"multi:{rid}": m["name"] for rid, m in settings.get("multi", {}).items()})
+    return names
+
+
+def new_ref_id(settings, kind) -> str:
+    used = settings.get("macros" if kind == "macro" else "multi", {})
+    n = 1
+    while f"{kind[0]}{n}" in used:
+        n += 1
+    return f"{kind[0]}{n}"
+
+
+def _macro(rid, raw):
+    if not keys.valid_ref_id(rid) or not isinstance(raw, dict):
+        return None
+    name = clean_text(raw.get("name"), 23)
+    steps = []
+    for st in (raw.get("steps") if isinstance(raw.get("steps"), list) else [])[:MAX_STEPS]:
+        if not isinstance(st, dict):
+            continue
+        t = st.get("type")
+        if t == "keys" and keys.is_pad_action(st.get("action")):
+            steps.append({"type": "keys", "action": st["action"]})
+        elif t == "text" and isinstance(st.get("text"), str) and st["text"]:
+            steps.append({"type": "text", "text": st["text"][:2000]})
+        elif t == "open" and isinstance(st.get("target"), str) and st["target"].strip():
+            steps.append({"type": "open", "target": st["target"].strip()[:500]})
+        elif t == "delay":
+            steps.append({"type": "delay", "ms": _int(st.get("ms"), 10, 10000, 500)})
+    return {"name": name, "steps": steps} if name else None
+
+
+def multi_action_ok(settings, aid) -> bool:
+    """What a tap / hold / double tap may do: a pad key, a macro, the microphone or nothing."""
+    return aid == "none" or keys.is_pad_action(aid) or aid.startswith("app:") or (
+        aid.startswith("macro:") and action_ok(settings, aid))
+
+
+def _multi(rid, raw, settings):
+    if not keys.valid_ref_id(rid) or not isinstance(raw, dict):
+        return None
+    name = clean_text(raw.get("name"), 23)
+    out = {"name": name}
+    for k in ("tap", "hold", "double"):
+        a = raw.get(k, "none")
+        out[k] = a if isinstance(a, str) and multi_action_ok(settings, a) else "none"
+    return out if name else None
+
+
+def active_profile(settings, program: str):
+    """Index of the profile for this program (lower-case exe name), or None."""
+    for i, p in enumerate(settings.get("profiles", [])):
+        if program and program in p["programs"]:
+            return i
+    return None
+
+
 def _scheme(raw):
     if not isinstance(raw, dict):
         return None
@@ -134,9 +237,40 @@ def validate(raw) -> dict:
     d["start_minimized"] = _bool(raw.get("start_minimized"), d["start_minimized"])
     d["pad_sync_pending"] = _bool(raw.get("pad_sync_pending"), d["pad_sync_pending"])
 
-    km = raw.get("keys")
-    if isinstance(km, list) and len(km) == keys.KEY_COUNT:
-        d["keys"] = [a if keys.is_valid(a) else keys.DEFAULT_LAYOUT[i] for i, a in enumerate(km)]
+    # macros and tap/hold keys first: the key lists may point at them
+    macros = raw.get("macros") if isinstance(raw.get("macros"), dict) else {}
+    for rid, m in list(macros.items())[:MAX_MACROS]:
+        m = _macro(rid, m)
+        if m:
+            d["macros"][rid] = m
+    multi = raw.get("multi") if isinstance(raw.get("multi"), dict) else {}
+    for rid, m in list(multi.items())[:MAX_MACROS]:
+        m = _multi(rid, m, d)
+        if m:
+            d["multi"][rid] = m
+
+    def layout(value, fallback, allow_layer=True):
+        if not (isinstance(value, list) and len(value) == keys.KEY_COUNT):
+            return list(fallback)
+        return [a if action_ok(d, a) and (allow_layer or a not in ("layer", "lights", "fun2")) else fallback[i]
+                for i, a in enumerate(value)]
+
+    d["keys"] = layout(raw.get("keys"), keys.DEFAULT_LAYOUT)
+    d["keys2"] = layout(raw.get("keys2"), d["keys2"], allow_layer=False)
+    profiles = raw.get("profiles") if isinstance(raw.get("profiles"), list) else []
+    for p in profiles[:MAX_PROFILES]:
+        if not isinstance(p, dict):
+            continue
+        name = clean_text(p.get("name"), 30)
+        progs = p.get("programs") if isinstance(p.get("programs"), list) else []
+        progs = list(dict.fromkeys(x for x in (clean_program(x) for x in progs[:20]) if x))
+        if name:
+            d["profiles"].append({"name": name, "programs": progs, "keys": layout(p.get("keys"), d["keys"])})
+    d["owner_name"] = clean_text(raw.get("owner_name"), 20)
+    sl, ds = raw.get("sleep"), d["sleep"]
+    if isinstance(sl, dict):
+        ds["when_locked"] = _bool(sl.get("when_locked"), ds["when_locked"])
+        ds["idle_minutes"] = _pick(sl.get("idle_minutes"), IDLE_CHOICES, ds["idle_minutes"])
 
     li, dl = raw.get("lights"), d["lights"]
     if isinstance(li, dict):
@@ -166,6 +300,8 @@ def validate(raw) -> dict:
             for key, default in defaults_.items():
                 if key == "season":
                     dd["options"][name][key] = _pick(given.get(key), SEASONS, default)
+                elif key in TIMER_LIMITS:
+                    dd["options"][name][key] = _int(given.get(key), *TIMER_LIMITS[key], default)
                 else:
                     dd["options"][name][key] = _bool(given.get(key), default)
         dd["brightness"] = _int(di.get("brightness"), 1, 16, dd["brightness"])

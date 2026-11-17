@@ -36,6 +36,9 @@ class FakePad:
         self.received = []
         self.saves = 0
         self.stop = False
+        self.proto = 1
+        self.picture = bytearray()          # what an upload wrote
+        self.picture_crc = 0
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
 
@@ -49,17 +52,38 @@ class FakePad:
                 return
             buf += data
             while b"\n" in buf:
-                line, buf = buf.split(b"\n", 1)
+                line, rest = buf.split(b"\n", 1)
+                if line.startswith(b"IC|"):              # picture part: raw bytes follow
+                    off, n = (int(x) for x in line[3:].split(b"|"))
+                    if len(rest) < n:
+                        break                            # wait for the rest
+                    self.picture[off:off + n] = rest[:n]
+                    buf = rest[n:]
+                    os.write(self.master, f"IK|{off}|1\n".encode())
+                    continue
+                buf = rest
                 self.received.append(line)
                 if not self.answer:
                     continue
-                if line == b"?":
-                    os.write(self.master, b"I|2.0.0|1|0|4|70|3\n")
+                if line == b"IP":
+                    os.write(self.master, f"IP|{self.picture_crc}|1\n".encode())
+                elif line.startswith(b"IB|"):
+                    self.picture = bytearray()
+                    os.write(self.master, b"IR\n")
+                elif line.startswith(b"IE|"):
+                    import zlib
+                    ok = int(line[3:]) == zlib.crc32(bytes(self.picture))
+                    if ok:
+                        self.picture_crc = int(line[3:])
+                    os.write(self.master, b"IA|1\n" if ok else b"IA|0|crc\n")
+                elif line == b"?":
+                    os.write(self.master, f"I|2.0.0|{self.proto}|0|4|70|3\n".encode())
                 elif line == b"W":
                     self.saves += 1
                     os.write(self.master, f"A|W|{count}|{rejected}\n".encode())
                     count = rejected = 0
-                elif line[:2] in (b"K|", b"G|", b"D|") or line[:3] in (b"LE|", b"LS|", b"LP|", b"LB|", b"LM|"):
+                elif line[:2] in (b"K|", b"G|", b"D|", b"N|") or line[:3] in (
+                        b"LE|", b"LS|", b"LP|", b"LB|", b"LM|", b"K2|", b"TO|"):
                     if self.reject_prefix and line.startswith(self.reject_prefix):
                         rejected += 1
                         os.write(self.master, b"A|E|" + line[:12] + b"\n")
@@ -327,3 +351,192 @@ class WindowTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ActionTests(unittest.TestCase):
+    """Macros, tap / hold / double tap, layer 2 and profiles, with a fake link."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        from macropad_app.actions import ActionRunner
+
+        class Link:
+            def __init__(self):
+                self.sent, self.mic = [], 0
+
+            def send(self, lines):
+                self.sent += lines
+
+            def toggle_mic(self):
+                self.mic += 1
+        self.link = Link()
+        self.s = config.validate({
+            "macros": {"m1": {"name": "M", "steps": [{"type": "keys", "action": "sc:copy"},
+                                                     {"type": "delay", "ms": 10},
+                                                     {"type": "keys", "action": "key:A"}]}},
+            "multi": {"t1": {"name": "T", "tap": "key:B", "hold": "key:C", "double": "key:D"},
+                      "t2": {"name": "T2", "tap": "key:E", "hold": "none", "double": "none"}},
+            "keys": ["macro:m1", "multi:t1", "multi:t2", "app:mic_mute"] + ["none"] * 11,
+            "keys2": ["key:F"] + ["none"] * 14,
+            "profiles": [{"name": "P", "programs": ["game.exe"], "keys": ["key:G"] + ["none"] * 14}]})
+        self.profile = None
+        self.runner = ActionRunner(self.link, lambda: (self.s, self.profile))
+
+    def wait(self, ms):
+        from PySide6.QtCore import QEventLoop, QTimer
+        loop = QEventLoop()
+        QTimer.singleShot(ms, loop.quit)
+        loop.exec()
+
+    def code(self, aid):
+        return protocol.tap_line(aid)
+
+    def test_macro_runs_its_steps_in_order(self):
+        self.runner.key_event(0, True, False, True)
+        self.runner.key_event(0, False, False, True)
+        self.wait(300)
+        self.assertEqual(self.link.sent, [self.code("sc:copy"), self.code("key:A")])
+
+    def test_tap_hold_double(self):
+        r = self.runner
+        r.key_event(1, True, False, True); r.key_event(1, False, False, True)   # tap ...
+        self.wait(400)                                                       # ... no second tap
+        self.assertEqual(self.link.sent, [self.code("key:B")])
+        self.link.sent.clear()
+        r.key_event(1, True, False, True); self.wait(550)                    # hold
+        self.assertEqual(self.link.sent, [self.code("key:C")])
+        r.key_event(1, False, False, True)
+        self.assertEqual(self.link.sent, [self.code("key:C")])               # letting go adds nothing
+        self.link.sent.clear()
+        r.key_event(1, True, False, True); r.key_event(1, False, False, True)
+        self.wait(80)
+        r.key_event(1, True, False, True); r.key_event(1, False, False, True)  # double tap
+        self.wait(400)
+        self.assertEqual(self.link.sent, [self.code("key:D")])
+
+    def test_tap_without_double_is_instant(self):
+        self.runner.key_event(2, True, False, True)
+        self.runner.key_event(2, False, False, True)
+        self.assertEqual(self.link.sent, [self.code("key:E")])
+
+    def test_mic_layer2_profile_and_pad_keys(self):
+        self.runner.key_event(3, True, False, True)
+        self.assertEqual(self.link.mic, 1)
+        self.runner.key_event(0, True, True, True)          # layer 2: key:F (a pad key reported as app key)
+        self.assertEqual(self.link.sent[-1], self.code("key:F"))
+        self.profile = 0
+        self.runner.key_event(0, True, False, True)
+        self.assertEqual(self.link.sent[-1], self.code("key:G"))
+        n = len(self.link.sent)
+        self.runner.key_event(5, True, False, False)        # not an app key: the pad did it
+        self.assertEqual(len(self.link.sent), n)
+
+    def test_overlay_and_stats(self):
+        lines = protocol.overlay_lines(self.s, 0)
+        self.assertEqual(lines[0], b"O|-\n")
+        self.assertIn(b"O|0|0|10|0|G\n", lines)
+        self.assertEqual(len(lines), 5)       # key 0 plus keys 1-3, which are "none" in the profile
+        self.assertEqual(protocol.overlay_lines(self.s, None), [b"O|-\n"])
+        from macropad_app.stats import KeyStats
+        path = Path(tempfile.mkdtemp()) / "stats.json"
+        st = KeyStats(path)
+        for k in (0, 0, 4):
+            st.count(k)
+        st.count(1, layer2=True)
+        st.flush()
+        st2 = KeyStats(path)
+        self.assertEqual(st2.totals(1)[:5], [2, 0, 0, 0, 1])
+        self.assertEqual(st2.totals(None, layer2=True)[1], 1)
+        path.write_text("{broken")
+        self.assertEqual(KeyStats(path).totals(), [0] * 15)
+
+
+class WidgetTests(unittest.TestCase):
+    """Focus timer, picture conversion and upload, widget messages."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    def wait(self, ms):
+        from PySide6.QtCore import QEventLoop, QTimer
+        loop = QEventLoop()
+        QTimer.singleShot(ms, loop.quit)
+        loop.exec()
+
+    def test_focus_timer_cycle(self):
+        from macropad_app import focus
+        t = focus.FocusTimer({"focus": 1, "break": 1, "long": 2})
+        ended = []
+        t.phase_ended.connect(lambda a, b: ended.append((a, b)))
+        self.assertEqual((t.phase, t.left), (focus.OFF, 60))
+        t.toggle()
+        self.assertEqual((t.phase, t.round, t.paused), (focus.FOCUS, 1, False))
+        t.toggle()                                   # pause
+        left = t.left
+        self.wait(1100)
+        self.assertAlmostEqual(t.left, left, delta=0.01)
+        t.toggle()                                   # go on
+        for r in range(1, 5):
+            self.assertEqual(t.phase, focus.FOCUS)
+            t.skip()
+            self.assertEqual(t.phase, focus.LONG_BREAK if r == 4 else focus.BREAK)
+            t.skip()
+        self.assertEqual((t.phase, t.round), (focus.FOCUS, 1))
+        self.assertEqual(len(ended), 8)
+        t.toggle()
+        t.skip()                                     # paused + skip = stop
+        self.assertEqual(t.phase, focus.OFF)
+
+    def test_picture_convert_and_upload(self):
+        from PIL import Image
+        from macropad_app import picture
+        d = Path(tempfile.mkdtemp())
+        still = d / "a.png"
+        Image.new("RGB", (640, 200), (255, 0, 0)).save(still)
+        pic = picture.convert(still)
+        self.assertEqual((pic.w, pic.h, pic.frames, len(pic.data)), (320, 170, 1, 320 * 170 * 2))
+        self.assertEqual(pic.data[:2], bytes([0x00, 0xF8]))       # pure red in RGB565
+        fitted = picture.convert(still, fit=True)
+        self.assertEqual(fitted.data[:2], b"\x00\x00")          # black edge above the picture
+        with self.assertRaises(ValueError):
+            picture.convert(d / "missing.png")
+        pad = FakePad()
+        pad.proto = 4
+        link = device.PadLink()
+        got = []
+        link.picture_done.connect(lambda ok, why: got.append((ok, why)), Qt.DirectConnection)
+        with mock.patch.object(device, "pad_ports", return_value=[(pad.port, 0x1001)]):
+            link.start()
+            for _ in range(60):
+                self.wait(100)
+                if link.info is not None:
+                    break
+            link.upload_picture(pic)
+            for _ in range(100):
+                self.wait(100)
+                if got:
+                    break
+            self.assertEqual(got, [(True, "")])
+            self.assertEqual(bytes(pad.picture), pic.data)
+            link.upload_picture(pic)                  # same picture again: nothing sent
+            for _ in range(50):
+                self.wait(100)
+                if len(got) == 2:
+                    break
+            self.assertEqual(got[1], (True, "same"))
+            self.assertTrue(any(l.startswith(b"Z|") and l.count(b"|") == 2 for l in pad.received))
+        link.stop()
+        pad.close()
+
+    def test_widget_lines(self):
+        d = config.validate({"display": {"background": "clock", "options": {"clock": {"seconds": False, "h12": True}}}})
+        self.assertEqual(protocol.display_line(d["display"], 4), b"D|9|1|16|1|2\n")
+        self.assertEqual(protocol.display_line(d["display"], 3), b"D|0|1|16|1|2\n")   # older pad: aquarium
+        self.assertEqual(protocol.stats_line(12.6, 140, None, -5), b"Q|13|100|-1|-1\n")
+        self.assertEqual(protocol.timer_line(-3, 60, 2, 3, True), b"U|0|60|2|3|1\n")

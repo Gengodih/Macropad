@@ -226,6 +226,50 @@ def song_time(session, playing):
         return 0, 0
 
 
+class MicVolume:
+    """The default microphone's mute switch (Windows), for "Microphone on/off"."""
+
+    def __init__(self):
+        self._ep = None
+        self._looked_at = 0.0
+
+    def _endpoint(self):
+        if self._ep is None or time.monotonic() - self._looked_at > 5:
+            self._looked_at = time.monotonic()
+            try:
+                dev = AudioUtilities.GetMicrophone()
+                if dev is None:
+                    self._ep = None
+                elif hasattr(dev, "EndpointVolume"):     # newer pycaw
+                    self._ep = dev.EndpointVolume
+                else:
+                    from comtypes import CLSCTX_ALL
+                    iface = dev.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+                    self._ep = iface.QueryInterface(IAudioEndpointVolume)
+            except Exception as e:
+                log.info("No microphone found: %s", e)
+                self._ep = None
+        return self._ep
+
+    def muted(self):
+        """True / False, or None if there is no microphone."""
+        try:
+            ep = self._endpoint()
+            return None if ep is None else bool(ep.GetMute())
+        except Exception:
+            self._ep = None
+            return None
+
+    def toggle(self):
+        try:
+            ep = self._endpoint()
+            if ep is not None:
+                ep.SetMute(0 if ep.GetMute() else 1, None)
+        except Exception as e:
+            log.info("Could not switch the microphone: %s", e)
+            self._ep = None
+
+
 class MasterVolume:
     """The whole PC's volume: the Windows volume slider of the current output
     (speakers, headphones ...). Same get / change / toggle_mute as AppVolume."""

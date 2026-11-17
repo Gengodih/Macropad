@@ -2,7 +2,7 @@
 # Build:  pyinstaller --noconfirm macropad.spec
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
-hidden = (collect_submodules("esptool") + collect_submodules("esp_pylib")
+hidden = (["psutil", "pynvml"] + collect_submodules("esptool") + collect_submodules("esp_pylib")
           + collect_submodules("winrt") + collect_submodules("pycaw") + collect_submodules("comtypes")
           + ["serial.tools.list_ports_windows"])
 datas = [("app/macropad_app/resources", "resources")]

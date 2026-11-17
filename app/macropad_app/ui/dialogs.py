@@ -4,11 +4,11 @@ import time
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QKeySequence
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
-                               QListWidget, QListWidgetItem, QMessageBox, QProgressBar, QPushButton,
-                               QStackedWidget, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFileDialog, QGridLayout, QHBoxLayout, QLabel,
+                               QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit, QProgressBar,
+                               QPushButton, QSpinBox, QStackedWidget, QVBoxLayout, QWidget)
 
-from .. import keys
+from .. import config, keys
 from ..i18n import T, language
 
 
@@ -93,14 +93,21 @@ class ComboRecorder(QLineEdit):
 
 
 class ActionPicker(QDialog):
-    """Choose what one key does: categories on the left, actions on the right."""
+    """Choose what one key does: categories on the left, actions on the right.
 
-    def __init__(self, parent, index, current):
+    mode: "key" (normal key), "layer2" (no layer / light keys), "sub" (part of a
+    tap/hold key: pad keys, macros, microphone), "keys_only" (a macro step).
+    draft: the settings being edited (new macros / tap-hold keys are added to it)."""
+
+    def __init__(self, parent, index, current, draft=None, mode="key", title=None):
         super().__init__(parent)
-        self.setWindowTitle(T("pick_title", n=index + 1))
-        self.resize(720, 480)
+        self.setWindowTitle(title or T("pick_title", n=index + 1))
+        self.resize(760, 500)
         self.result_id = current
+        self.draft = draft
+        self.mode = mode
         lang = language()
+        names = config.action_names(draft) if draft else {}
         lay = QVBoxLayout(self)
         body = QHBoxLayout()
         lay.addLayout(body, 1)
@@ -114,7 +121,26 @@ class ActionPicker(QDialog):
         self.desc.setWordWrap(True)
         lay.addWidget(self.desc)
 
-        groups = [("special", [(a, keys.label(a, lang)) for a in ("none", "lights", "fun2")]),
+        special = ("none", "lights", "fun2") if mode == "key" else ("none",)
+        groups = []
+        if mode != "keys_only":
+            groups.append(("special", [(a, keys.label(a, lang)) for a in special]))
+            more = []
+            if mode == "key":
+                more.append(("layer", keys.label("layer", lang)))
+            more.append(("app:mic_mute", keys.label("app:mic_mute", lang)))
+            if draft:
+                for rid, m in draft["macros"].items():
+                    more.append((f"macro:{rid}", "\u25B6  " + T("macro_item", name=m["name"])))
+                if mode != "sub":
+                    for rid, m in draft["multi"].items():
+                        more.append((f"multi:{rid}", "\u25CE  " + T("multi_item", name=m["name"])))
+                more += [("+macro", "\uFF0B  " + T("new_macro")), ("+open", "\uFF0B  " + T("new_open")),
+                         ("+text", "\uFF0B  " + T("new_text"))]
+                if mode != "sub":
+                    more.append(("+multi", "\uFF0B  " + T("new_multi")))
+            groups.append(("app", more))
+        groups += [
                   ("fkeys_high", [(f"key:{k.name}", k.name) for k in keys.KEY_GROUPS["fkeys_high"]]),
                   ("media", [(f"media:{n}", keys.label(f"media:{n}", lang)) for n in keys.MEDIA]),
                   ("shortcuts", [(f"sc:{n}", f"{keys.label('sc:' + n, lang)}   ({keys.shortcut_text('sc:' + n, lang)})")
@@ -218,10 +244,26 @@ class ActionPicker(QDialog):
             self.recorder.setText(keys.label(self.result_id, language()))
             self._describe(self.result_id)
 
+    def accept(self):
+        """The "+ new ..." entries open their editor first."""
+        rid = self.result_id
+        if isinstance(rid, str) and rid.startswith("+") and self.draft is not None:
+            if rid == "+multi":
+                d = MultiEditor(self, self.draft)
+            else:
+                d = MacroEditor(self, self.draft, preset=rid[1:])
+            if not d.exec():
+                return
+            self.result_id = d.action_id
+        super().accept()
+
     def _describe(self, aid):
         kind = str(aid).partition(":")[0]
-        if kind in ("none", "lights", "fun2"):
+        if kind in ("none", "lights", "fun2", "layer"):
             self.desc.setText(T(f"desc_{kind}"))
+        elif kind in ("app", "macro", "multi") or str(aid).startswith("+"):
+            key = {"app": "desc_mic", "macro": "desc_macro", "multi": "desc_multi"}.get(kind)
+            self.desc.setText(T(key) if key else T("desc_" + str(aid)[1:]))
         else:
             try:
                 extra = keys.shortcut_text(aid, language())
@@ -351,3 +393,363 @@ class ProgressDialog(QDialog):
 
     def reject(self):     # Esc behaves like the Cancel button
         self._cancel()
+
+
+# ---------------------------------------------------------------------------
+#  Macros, tap / hold keys, profiles
+# ---------------------------------------------------------------------------
+def _buttons(dialog, layout, ok_text=None):
+    row = QHBoxLayout()
+    row.addStretch()
+    cancel = QPushButton(T("cancel"))
+    ok = QPushButton(ok_text or T("ok"))
+    ok.setObjectName("Primary")
+    cancel.clicked.connect(dialog.reject)
+    ok.clicked.connect(dialog.accept)
+    row.addWidget(cancel)
+    row.addWidget(ok)
+    layout.addLayout(row)
+    return ok
+
+
+def step_text(step) -> str:
+    """One macro step as a line of text."""
+    t = step["type"]
+    if t == "keys":
+        return "\u2328  " + keys.label(step["action"], language())
+    if t == "text":
+        text = step["text"].replace("\n", " \u21B5 ")
+        return "\u270E  " + T("step_text", text=text[:60] + ("\u2026" if len(text) > 60 else ""))
+    if t == "open":
+        return "\u2197  " + T("step_open", target=step["target"])
+    return "\u23F1  " + T("step_delay", ms=step["ms"])
+
+
+class TextStepDialog(QDialog):
+    def __init__(self, parent, text=""):
+        super().__init__(parent)
+        self.setWindowTitle(T("new_text"))
+        self.resize(480, 300)
+        lay = QVBoxLayout(self)
+        hint = QLabel(T("text_hint"))
+        hint.setWordWrap(True)
+        hint.setObjectName("Hint")
+        lay.addWidget(hint)
+        self.edit = QPlainTextEdit(text)
+        lay.addWidget(self.edit, 1)
+        _buttons(self, lay)
+
+    def value(self):
+        return self.edit.toPlainText()[:2000]
+
+
+class OpenStepDialog(QDialog):
+    def __init__(self, parent, target=""):
+        super().__init__(parent)
+        self.setWindowTitle(T("new_open"))
+        self.setMinimumWidth(520)
+        lay = QVBoxLayout(self)
+        hint = QLabel(T("open_hint"))
+        hint.setWordWrap(True)
+        hint.setObjectName("Hint")
+        lay.addWidget(hint)
+        row = QHBoxLayout()
+        self.edit = QLineEdit(target)
+        self.edit.setPlaceholderText("https://...  /  C:\\Programs\\...")
+        row.addWidget(self.edit, 1)
+        browse = QPushButton(T("browse"))
+        browse.clicked.connect(self._browse)
+        row.addWidget(browse)
+        lay.addLayout(row)
+        _buttons(self, lay)
+
+    def _browse(self):
+        path, _ = QFileDialog.getOpenFileName(self, T("new_open"), "", T("open_filter"))
+        if path:
+            self.edit.setText(path.replace("/", "\\") if "\\" in path or ":" in path[:3] else path)
+
+    def value(self):
+        return self.edit.text().strip()[:500]
+
+
+class MacroEditor(QDialog):
+    """A macro: several steps one after another (keys, text, open, pause).
+    preset: "macro" (empty), "open" or "text" (starts with that one step)."""
+
+    def __init__(self, parent, draft, rid=None, preset="macro"):
+        super().__init__(parent)
+        self.draft = draft
+        self.rid = rid
+        self.action_id = None
+        old = draft["macros"].get(rid) if rid else None
+        self.steps = [dict(s) for s in old["steps"]] if old else []
+        self.setWindowTitle(T("macro_title"))
+        self.resize(620, 520)
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel(T("macro_name")))
+        self.name = QLineEdit(old["name"] if old else "")
+        self.name.setMaxLength(23)
+        lay.addWidget(self.name)
+        hint = QLabel(T("macro_hint"))
+        hint.setWordWrap(True)
+        hint.setObjectName("Hint")
+        lay.addWidget(hint)
+        body = QHBoxLayout()
+        self.list = QListWidget()
+        self.list.itemDoubleClicked.connect(lambda _: self._edit())
+        body.addWidget(self.list, 1)
+        side = QVBoxLayout()
+        for text, fn in ((T("add_keys"), self._add_keys), (T("add_text"), self._add_text),
+                         (T("add_open"), self._add_open), (T("add_delay"), self._add_delay)):
+            b = QPushButton(text)
+            b.clicked.connect(fn)
+            side.addWidget(b)
+        side.addSpacing(12)
+        for text, fn in ((T("step_edit"), self._edit), (T("step_up"), lambda: self._move(-1)),
+                         (T("step_down"), lambda: self._move(1)), (T("step_remove"), self._remove)):
+            b = QPushButton(text)
+            b.clicked.connect(fn)
+            side.addWidget(b)
+        side.addStretch()
+        body.addLayout(side)
+        lay.addLayout(body, 1)
+        delay_row = QHBoxLayout()
+        delay_row.addWidget(QLabel(T("delay_ms")))
+        self.delay = QSpinBox()
+        self.delay.setRange(10, 10000)
+        self.delay.setSingleStep(50)
+        self.delay.setValue(500)
+        delay_row.addWidget(self.delay)
+        delay_row.addStretch()
+        lay.addLayout(delay_row)
+        _buttons(self, lay, T("save"))
+        if not old and preset == "open":
+            self.name.setText(T("default_open_name"))
+            if not self._add_open():
+                self.name.setText("")
+        elif not old and preset == "text":
+            self.name.setText(T("default_text_name"))
+            if not self._add_text():
+                self.name.setText("")
+        self._fill()
+
+    def _fill(self, select=None):
+        self.list.clear()
+        for st in self.steps:
+            self.list.addItem(step_text(st))
+        if select is not None and 0 <= select < len(self.steps):
+            self.list.setCurrentRow(select)
+
+    def _insert(self, step):
+        row = self.list.currentRow()
+        pos = row + 1 if row >= 0 else len(self.steps)
+        if len(self.steps) >= config.MAX_STEPS:
+            info(self, T("macro_full", n=config.MAX_STEPS))
+            return False
+        self.steps.insert(pos, step)
+        self._fill(pos)
+        return True
+
+    def _add_keys(self):
+        d = ActionPicker(self, 0, "key:F13", mode="keys_only", title=T("add_keys"))
+        if d.exec() and keys.is_pad_action(d.result_id):
+            return self._insert({"type": "keys", "action": d.result_id})
+        return False
+
+    def _add_text(self):
+        d = TextStepDialog(self)
+        if d.exec() and d.value():
+            return self._insert({"type": "text", "text": d.value()})
+        return False
+
+    def _add_open(self):
+        d = OpenStepDialog(self)
+        if d.exec() and d.value():
+            return self._insert({"type": "open", "target": d.value()})
+        return False
+
+    def _add_delay(self):
+        return self._insert({"type": "delay", "ms": self.delay.value()})
+
+    def _edit(self):
+        row = self.list.currentRow()
+        if row < 0:
+            return
+        st = self.steps[row]
+        if st["type"] == "keys":
+            d = ActionPicker(self, 0, st["action"], mode="keys_only", title=T("add_keys"))
+            if d.exec() and keys.is_pad_action(d.result_id):
+                st["action"] = d.result_id
+        elif st["type"] == "text":
+            d = TextStepDialog(self, st["text"])
+            if d.exec() and d.value():
+                st["text"] = d.value()
+        elif st["type"] == "open":
+            d = OpenStepDialog(self, st["target"])
+            if d.exec() and d.value():
+                st["target"] = d.value()
+        else:
+            st["ms"] = self.delay.value()
+        self._fill(row)
+
+    def _move(self, delta):
+        row = self.list.currentRow()
+        new = row + delta
+        if row < 0 or not 0 <= new < len(self.steps):
+            return
+        self.steps[row], self.steps[new] = self.steps[new], self.steps[row]
+        self._fill(new)
+
+    def _remove(self):
+        row = self.list.currentRow()
+        if row >= 0:
+            del self.steps[row]
+            self._fill(min(row, len(self.steps) - 1))
+
+    def accept(self):
+        name = config.clean_text(self.name.text(), 23)
+        if not name:
+            info(self, T("macro_need_name"))
+            return
+        if not self.steps:
+            info(self, T("macro_need_step"))
+            return
+        if self.rid is None:
+            if len(self.draft["macros"]) >= config.MAX_MACROS:
+                info(self, T("macros_full", n=config.MAX_MACROS))
+                return
+            self.rid = config.new_ref_id(self.draft, "macro")
+        self.draft["macros"][self.rid] = {"name": name, "steps": self.steps}
+        self.action_id = f"macro:{self.rid}"
+        super().accept()
+
+
+class MultiEditor(QDialog):
+    """One key, up to three jobs: tap, hold, double tap."""
+
+    def __init__(self, parent, draft, rid=None):
+        super().__init__(parent)
+        self.draft = draft
+        self.rid = rid
+        self.action_id = None
+        old = draft["multi"].get(rid) if rid else None
+        self.values = {k: (old[k] if old else ("sc:copy" if k == "tap" else "none")) for k in ("tap", "hold", "double")}
+        if not old:
+            self.values["hold"] = "sc:paste"
+        self.setWindowTitle(T("multi_title"))
+        self.setMinimumWidth(520)
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel(T("macro_name")))
+        self.name = QLineEdit(old["name"] if old else T("default_multi_name"))
+        self.name.setMaxLength(23)
+        lay.addWidget(self.name)
+        hint = QLabel(T("multi_hint"))
+        hint.setWordWrap(True)
+        hint.setObjectName("Hint")
+        lay.addWidget(hint)
+        grid = QGridLayout()
+        self.buttons = {}
+        for row, k in enumerate(("tap", "hold", "double")):
+            grid.addWidget(QLabel(T(f"multi_{k}")), row, 0)
+            b = QPushButton()
+            b.clicked.connect(lambda _=False, k=k: self._pick(k))
+            grid.addWidget(b, row, 1)
+            self.buttons[k] = b
+        grid.setColumnStretch(1, 1)
+        lay.addLayout(grid)
+        _buttons(self, lay, T("save"))
+        self._show()
+
+    def _show(self):
+        names = config.action_names(self.draft)
+        for k, b in self.buttons.items():
+            b.setText(keys.label(self.values[k], language(), names))
+
+    def _pick(self, k):
+        d = ActionPicker(self, 0, self.values[k], draft=self.draft, mode="sub", title=T(f"multi_{k}"))
+        if d.exec() and config.multi_action_ok(self.draft, d.result_id):
+            self.values[k] = d.result_id
+            self._show()
+
+    def accept(self):
+        name = config.clean_text(self.name.text(), 23)
+        if not name:
+            info(self, T("macro_need_name"))
+            return
+        if self.rid is None:
+            if len(self.draft["multi"]) >= config.MAX_MACROS:
+                info(self, T("macros_full", n=config.MAX_MACROS))
+                return
+            self.rid = config.new_ref_id(self.draft, "multi")
+        self.draft["multi"][self.rid] = {"name": name, **self.values}
+        self.action_id = f"multi:{self.rid}"
+        super().accept()
+
+
+class ProfileDialog(QDialog):
+    """Name of a profile and the programs it is for."""
+
+    def __init__(self, parent, profile=None, running=()):
+        super().__init__(parent)
+        self.setWindowTitle(T("profile_title"))
+        self.resize(520, 520)
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel(T("profile_name")))
+        self.name = QLineEdit(profile["name"] if profile else "")
+        self.name.setMaxLength(30)
+        lay.addWidget(self.name)
+        hint = QLabel(T("profile_hint"))
+        hint.setWordWrap(True)
+        hint.setObjectName("Hint")
+        lay.addWidget(hint)
+        self.list = QListWidget()
+        chosen = list(profile["programs"]) if profile else []
+        for exe in list(dict.fromkeys(chosen + list(running))):
+            self._add_item(exe, exe in chosen)
+        lay.addWidget(self.list, 1)
+        row = QHBoxLayout()
+        self.extra = QLineEdit()
+        self.extra.setPlaceholderText(T("profile_add_ph"))
+        self.extra.returnPressed.connect(self._add_typed)
+        row.addWidget(self.extra, 1)
+        add = QPushButton(T("profile_add"))
+        add.clicked.connect(self._add_typed)
+        row.addWidget(add)
+        browse = QPushButton(T("browse"))
+        browse.clicked.connect(self._browse)
+        row.addWidget(browse)
+        lay.addLayout(row)
+        _buttons(self, lay, T("save"))
+
+    def _add_item(self, exe, checked):
+        for i in range(self.list.count()):
+            if self.list.item(i).text() == exe:
+                self.list.item(i).setCheckState(Qt.Checked if checked else self.list.item(i).checkState())
+                return
+        it = QListWidgetItem(exe)
+        it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+        it.setCheckState(Qt.Checked if checked else Qt.Unchecked)
+        self.list.addItem(it)
+
+    def _add_typed(self):
+        exe = config.clean_program(self.extra.text())
+        if exe:
+            self._add_item(exe, True)
+            self.extra.clear()
+
+    def _browse(self):
+        path, _ = QFileDialog.getOpenFileName(self, T("profile_add"), "", T("exe_filter"))
+        exe = config.clean_program(path)
+        if exe:
+            self._add_item(exe, True)
+
+    def accept(self):
+        if not config.clean_text(self.name.text(), 30):
+            info(self, T("profile_need_name"))
+            return
+        super().accept()
+
+    def value(self):
+        progs = [self.list.item(i).text() for i in range(self.list.count())
+                 if self.list.item(i).checkState() == Qt.Checked]
+        return config.clean_text(self.name.text(), 30), progs

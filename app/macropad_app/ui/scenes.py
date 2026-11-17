@@ -14,6 +14,24 @@ from .theme import ACCENT
 _seed = random.Random()
 
 
+class LiveInfo:
+    """What the widget previews show: set by the main window."""
+
+    def __init__(self):
+        self.lang = 0
+        self.stats = (None, None, None, None)      # cpu, ram, gpu, gpu temperature
+        self.timer = (0.0, 25 * 60.0, 0, 0, False)  # left, total, phase, round, paused
+        self.picture = None                         # picture.Picture or None
+        self.picture_version = 0
+
+    def set_picture(self, pic):
+        self.picture = pic
+        self.picture_version += 1
+
+
+live = LiveInfo()
+
+
 class Scene:
     """One background, run by the pad's own code. paint() draws it into any
     rectangle, filling it (the middle is kept, the edges cut off as needed)."""
@@ -24,6 +42,7 @@ class Scene:
         self.level = 0.0
         self._level_at = 0.0
         self._r = None
+        self._pic_version = -1
         if bgfx.available():
             try:
                 self._r = bgfx.Renderer(_seed.getrandbits(32) or 1)
@@ -53,6 +72,18 @@ class Scene:
             return
         if time.monotonic() - self._level_at > 0.3:   # no music data: silence
             self.level *= 0.85
+        if self.name in config.WIDGETS:
+            cpu, ram, gpu, temp = live.stats
+            left, total, phase, round_, paused = live.timer
+            self._r.set_info(protocol.local_epoch(), live.lang, -1 if cpu is None else cpu, -1 if ram is None else ram,
+                             -1 if gpu is None else gpu, -1 if temp is None else temp, left, total, phase, round_, paused)
+            if self.name == "picture" and self._pic_version != live.picture_version:
+                self._pic_version = live.picture_version
+                p = live.picture
+                if p is None:
+                    self._r.set_picture(None)
+                else:
+                    self._r.set_picture(p.data, p.w, p.h, p.frames, p.delay_ms)
         self._r.update(dt, self.level, colour, time.localtime().tm_mon)
         self.image = self._r.frame()
 

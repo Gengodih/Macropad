@@ -28,6 +28,8 @@ struct Renderer {
   uint32_t seed = 1;
   uint8_t kind = bgx::SYNTHWAVE;
   uint8_t opts = 0;
+  bgx::Inputs info;                 // time, PC stats, timer (bgfx_set_info)
+  uint16_t *picture = nullptr;      // own copy of the picture (bgfx_set_picture)
 
   bool startTank() {
     if (tank) return true;
@@ -43,11 +45,12 @@ struct Renderer {
   ~Renderer() {
     delete tank;
     for (auto b : tankBufs) free(b);
+    free(picture);
   }
 };
 }  // namespace
 
-BGFX_API int bgfx_version() { return 1; }
+BGFX_API int bgfx_version() { return 2; }
 BGFX_API int bgfx_width() { return aq::W; }
 BGFX_API int bgfx_height() { return aq::H; }
 
@@ -94,12 +97,44 @@ BGFX_API void bgfx_update(void *h, float dt, float level, int hue, int sat, int 
     if (r->tank) r->tank->update(dt);
     return;
   }
-  bgx::Inputs in;
+  bgx::Inputs in = r->info;
   in.level = level < 0 ? 0 : (level > 1 ? 1 : level);
   in.accentHue = (uint16_t)hue;
   in.accentSat = (uint8_t)sat;
   in.month = (uint8_t)(month >= 1 && month <= 12 ? month : 0);
   r->fx.update(dt, in);
+}
+
+// Time, PC stats and the focus timer for the widgets (-1 = unknown)
+BGFX_API void bgfx_set_info(void *h, uint32_t epoch, int lang, float cpu, float ram, float gpu, float gpuTemp,
+                            float timerLeft, float timerTotal, int timerPhase, int timerRound, int timerPaused) {
+  Renderer *r = static_cast<Renderer *>(h);
+  if (!r) return;
+  bgx::Inputs &i = r->info;
+  i.epoch = epoch;
+  i.lang = lang == 1 ? 1 : 0;
+  i.cpu = cpu; i.ram = ram; i.gpu = gpu; i.gpuTemp = gpuTemp;
+  i.timerLeft = timerLeft; i.timerTotal = timerTotal;
+  i.timerPhase = (uint8_t)(timerPhase >= 0 && timerPhase <= 3 ? timerPhase : 0);
+  i.timerRound = (uint8_t)(timerRound >= 0 && timerRound <= 9 ? timerRound : 0);
+  i.timerPaused = timerPaused != 0;
+}
+
+// The own picture: frames of w x h RGB565 pixels (320x170 or 160x85); null = none
+BGFX_API int bgfx_set_picture(void *h, const uint16_t *pixels, int w, int hgt, int frames, int delayMs) {
+  Renderer *r = static_cast<Renderer *>(h);
+  if (!r) return 0;
+  free(r->picture);
+  r->picture = nullptr;
+  r->fx.setPicture(nullptr, 0, 0, 0, 0);
+  bool ok = pixels && frames > 0 && frames < 1000 && ((w == 320 && hgt == 170) || (w == 160 && hgt == 85));
+  if (!ok) return 0;
+  size_t n = (size_t)w * hgt * frames;
+  r->picture = static_cast<uint16_t *>(malloc(n * 2));
+  if (!r->picture) return 0;
+  memcpy(r->picture, pixels, n * 2);
+  r->fx.setPicture(r->picture, (uint16_t)w, (uint16_t)hgt, (uint16_t)frames, (uint16_t)delayMs);
+  return 1;
 }
 
 // Draws the frame and copies it (RGB565, 320 x 170, little endian) to out.

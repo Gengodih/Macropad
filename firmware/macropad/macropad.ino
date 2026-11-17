@@ -62,10 +62,11 @@
 #include <Preferences.h>
 #include <esp_heap_caps.h>
 #include "esp32-hal-tinyusb.h"   // usb_persist_restart(): reboot into flash mode for updates
+#include <esp_partition.h>       // own picture: kept in the flash area after the app
 
 // Firmware version, reported to the Macro Pad app (Update & Repair compares it).
-const char FW_VERSION[] = "2.1.0";
-const uint8_t PROTO_VERSION = 2;   // settings messages understood by this firmware (2: more backgrounds)
+const char FW_VERSION[] = "2.3.0";
+const uint8_t PROTO_VERSION = 4;   // settings messages understood by this firmware (2: backgrounds, 3: app keys, 4: widgets)
 #include "Aquarium.h"   // the aquarium scene (second file in this sketch folder)
 #include "Backgrounds.h"   // the other animated backgrounds
 
@@ -114,7 +115,7 @@ const bool STARTUP_ANIMATION = true;
 //      Welcome, Max!
 //    to your Macro Pad
 //  handcrafted by Gengodih
-const char OWNER_NAME[] = "";          // whose pad it is ("" = just "Welcome!")
+const char OWNER_NAME[] = "";          // whose pad it is ("" = just "Welcome!"); the app can set it too
 const char MAKER_NAME[] = "Gengodih";  // who built it ("" = leave that line out)
 const uint32_t LED_FRAME_MS = 20;  // 50 light updates per second
 
@@ -147,7 +148,7 @@ const uint8_t HID_F13 = 0x68, HID_F14 = 0x69, HID_F15 = 0x6A, HID_F16 = 0x6B,
 // Modifier bits
 const uint8_t MOD_CTRL = 0x01, MOD_SHIFT = 0x02, MOD_ALT = 0x04, MOD_WIN = 0x08;
 
-enum ActionType : uint8_t { ACT_KEY, ACT_MEDIA, ACT_LIGHTS, ACT_COLOUR, ACT_NONE, ACT_TYPE_COUNT };
+enum ActionType : uint8_t { ACT_KEY, ACT_MEDIA, ACT_LIGHTS, ACT_COLOUR, ACT_NONE, ACT_APP, ACT_LAYER, ACT_TYPE_COUNT };
 
 struct KeyAction {
   ActionType type;
@@ -158,6 +159,9 @@ struct KeyAction {
 // ACT_LIGHTS = the light key: nothing is sent to the PC.
 // ACT_COLOUR = tap sends its key (when you let go); hold + turn the knob picks the light colour.
 // ACT_NONE   = does nothing.
+// ACT_APP    = the app does it (macro, text, program, tap/hold ...): the pad only reports
+//              the press. Without the app the key does its default job.
+// ACT_LAYER  = while held, the other keys do their layer-2 job.
 
 // Default for each key, in the key order shown above. The Macro Pad app can
 // change every key; its choice is kept in flash (see loadSettings).
@@ -183,6 +187,12 @@ const KeyAction DEFAULT_ACTIONS[KEY_COUNT] = {
 };
 // What each key does right now (defaults, or what the app sent).
 KeyAction actions[KEY_COUNT];
+KeyAction actions2[KEY_COUNT];           // layer 2: while a layer key is held (saved too)
+KeyAction overlay[KEY_COUNT];            // the profile of the program in front (from the app, not saved)
+uint16_t overlayMask = 0;                // which keys the profile changes
+const KeyAction NO_ACTION = {ACT_NONE, 0, 0, ""};
+uint8_t layerHeld = 0;                   // layer keys held down right now
+char ownerName[24] = "";                 // for the welcome ("" = OWNER_NAME)
 const KeyAction ACTION_BOOT = {ACT_KEY, HID_F24, 0, "BOOT key (F24)"};
 
 // ============================================================================
@@ -247,6 +257,16 @@ bool matrixRaw[KEY_COUNT];   // latest matrix scan, true = pressed
 // What each key was doing when it went down. Its release uses the same action,
 // even if the app changed the key (or went offline) while it was held.
 KeyAction held[KEY_COUNT];
+bool heldLayer2[KEY_COUNT];   // the press came from layer 2
+// Key lights the app sets (e.g. red while the microphone is muted)
+uint16_t highlightMask = 0;
+uint8_t highlightRGB[KEY_COUNT][3];
+// Sleep: screen and lights off while the PC is locked / asleep, or after a while without a key
+uint8_t idleMinutes = 0;                 // 0 = never (from the app)
+uint32_t lastActivity = 0;
+bool pcLocked = false;                   // from the app
+volatile bool usbSuspended = false;      // the PC put USB to sleep
+volatile bool padAsleep = false;
 Button encButton, bootButton, io14Button;
 
 // Encoder, decoded in an interrupt so no click is lost while the screen redraws
@@ -338,17 +358,17 @@ uint8_t builtinMask = 0x3F;     // bit n set = built-in mode n is in the rotatio
 enum Txt : uint8_t {
   T_LIGHTS_FMT, T_COLOUR_FMT, T_LIGHT_LEVEL_FMT, T_MUTED, T_SOUND_ON, T_WIN_VOL_UP, T_WIN_VOL_DOWN,
   T_WIN_MUTE, T_MUSIC, T_OFFLINE, T_KEYS_NORMAL, T_KNOB_WIN, T_OFFLINE_LONG, T_CONNECTED,
-  T_SAVED, T_UPDATE, T_COUNT};
+  T_SAVED, T_UPDATE, T_PICTURE, T_COUNT};
 const char *const TEXT_EN[T_COUNT] = {
   "Lights: %s", "Colour: %s", "Light brightness %d%%", "Sound muted", "Sound on",
   "Windows volume +", "Windows volume -", "Windows mute", "Music", "PC app offline",
   "Keys work normally.", "Knob = Windows volume", "PC app offline - keys work normally",
-  "PC app connected", "Settings saved", "Update mode..."};
+  "PC app connected", "Settings saved", "Update mode...", "Receiving picture..."};
 const char *const TEXT_DE[T_COUNT] = {
   "Licht: %s", "Farbe: %s", "Lichthelligkeit %d%%", "Ton aus", "Ton an",
   "Lautst\x84rke +", "Lautst\x84rke -", "Ton aus (Windows)", "Musik", "PC-App offline",
   "Tasten funktionieren.", "Knopf = Lautst\x84rke", "PC-App offline - Tasten funktionieren",
-  "PC-App verbunden", "Gespeichert", "Update-Modus..."};
+  "PC-App verbunden", "Gespeichert", "Update-Modus...", "Bild kommt an..."};
 const char *const LIGHT_NAMES_EN[L_COUNT] = {
   "Rainbow wave", "Gradient", "Music colour", "Music beat", "Key glow", "One colour", "Lights off"};
 const char *const LIGHT_NAMES_DE[L_COUNT] = {
@@ -374,11 +394,34 @@ const uint8_t COLOUR_COUNT = sizeof(COLOURS) / sizeof(COLOURS[0]);
 // Screen settings (from the app)
 // The same numbers as bgx::Kind and the app. BG_PLAIN = no animation (the normal screen).
 enum BgAnim : uint8_t {
-  BG_AQUARIUM, BG_PLAIN, BG_SYNTHWAVE, BG_LAVA, BG_SPACE, BG_FIRE, BG_MATRIX, BG_RAIN, BG_SEASONS, BG_COUNT};
+  BG_AQUARIUM, BG_PLAIN, BG_SYNTHWAVE, BG_LAVA, BG_SPACE, BG_FIRE, BG_MATRIX, BG_RAIN, BG_SEASONS,
+  BG_CLOCK, BG_STATS, BG_TIMER, BG_PICTURE, BG_COUNT};
 uint8_t bgAnim = BG_AQUARIUM;    // background while no music screen is shown
 bool showFish = true;            // fish in the aquarium
 uint8_t bgOptions = 0x01;        // option bits of the other backgrounds (see Backgrounds.h)
 uint8_t padMonth = 0;            // 1-12 from the PC (for "Seasons"), kept in flash
+// Widgets: time, PC stats and the focus timer come from the app
+uint32_t clockBase = 0, clockAt = 0;     // local time (s since 1970) at millis() clockAt; 0 = unknown
+float pcCpu = -1, pcRam = -1, pcGpu = -1, pcGpuTemp = -1;
+uint32_t statsAt = 0;
+float timerLeft = 0, timerTotal = 0;
+uint8_t timerPhase = 0, timerRound = 0;
+bool timerPaused = false;
+uint32_t timerAt = 0;
+// Own picture in the "spiffs" flash area: 16-byte header, then RGB565 frames
+struct PicHeader {
+  uint32_t magic;                        // 'MPIC' once complete
+  uint16_t w, h, frames, delayMs;
+  uint32_t crc;                          // CRC-32 of the pixel data
+};
+const uint32_t PIC_MAGIC = 0x4349504D;
+const esp_partition_t *picPart = nullptr;
+const void *picMap = nullptr;
+esp_partition_mmap_handle_t picMapHandle = 0;
+PicHeader picHeader = {};
+uint32_t picExpect = 0, picGot = 0, picOffset = 0;  // a part of an upload being received
+uint32_t picLastByte = 0;
+uint8_t *picBuf = nullptr;
 uint8_t screenLevel = 16;        // backlight when "bright", 1-16
 bool showMusic = true;           // music screen (cover, title, volume) while music plays
 
@@ -420,6 +463,7 @@ const char *colourName(uint8_t i) {
 
 // Backlight chip level (0-16) for brightness step 0 (bright), 1 (dim), 2 (off)
 uint8_t backlightFor(uint8_t idx) {
+  if (padAsleep) return 0;                 // asleep: screen dark
   if (idx == 0) return screenLevel;
   if (idx == BRIGHT_DIM) return max(1, screenLevel / 4);
   return 0;
@@ -617,10 +661,34 @@ void sendKeyboardState() {
 // The Lights and Fun 2 keys can get other jobs in the app, but only while the
 // app is running: without it they are the light keys again, so the lights can
 // always be changed on the pad.
-const KeyAction &actionFor(int i, bool alive) {
+// Keys the app does itself (ACT_APP) do their default job while it is off.
+// A profile (overlay) only counts while the app runs.
+const KeyAction &actionFor(int i, bool alive, bool layer2 = false) {
+  if (layer2) {
+    const KeyAction &a = actions2[i];
+    return (a.type == ACT_APP && !alive) ? NO_ACTION : a;
+  }
   ActionType d = DEFAULT_ACTIONS[i].type;
   if (!alive && (d == ACT_LIGHTS || d == ACT_COLOUR)) return DEFAULT_ACTIONS[i];
+  if (alive && (overlayMask & (1u << i))) return overlay[i];
+  if (!alive && actions[i].type == ACT_APP) return DEFAULT_ACTIONS[i];
   return actions[i];
+}
+
+// The app asked the pad to type a key (part of a macro / tap-hold): press and let go
+void tapForApp(uint8_t type, uint16_t code, uint8_t mods) {
+  if (type == ACT_MEDIA) {
+    ConsumerControl.press(code);
+    delay(10);
+    ConsumerControl.release();
+    return;
+  }
+  KeyReport r = {};
+  r.modifiers = mods;
+  r.keys[0] = (uint8_t)code;
+  Keyboard.sendReport(&r);
+  delay(10);
+  sendKeyboardState();
 }
 
 // The T-Display-S3 backlight chip is set by counting pulses on its pin
@@ -675,13 +743,32 @@ void handleKeys(uint32_t now) {
   for (int i = 0; i < KEY_COUNT; i++) {
     if (!updateDebounced(keys[i], matrixRaw[i], now)) continue;
     if (keys[i].stable) {
-      held[i] = actionFor(i, alive);      // remember what this press does
+      bool l2 = layerHeld > 0 && actions[i].type != ACT_LAYER;
+      held[i] = actionFor(i, alive, l2);  // remember what this press does
+      heldLayer2[i] = l2;
       keyPressedAt[i] = now;
+      lastActivity = now;
+      pcLocked = false;                   // someone is here
       notePress(held[i].label);           // fish food / the animated background reacts
     }
     const KeyAction &a = held[i];
+    // the app counts presses (statistics) and does the ACT_APP keys
+    if (alive) Serial.printf("P|%d|%d|%d|%d\n", i, keys[i].stable ? 1 : 0, heldLayer2[i] ? 1 : 0, a.type == ACT_APP ? 1 : 0);
 
     if (a.type == ACT_NONE) continue;
+    if (a.type == ACT_APP) {
+      if (keys[i].stable && a.label[0]) showToast(a.label);
+      continue;
+    }
+    if (a.type == ACT_LAYER) {
+      if (keys[i].stable) {
+        layerHeld++;
+        if (a.label[0]) showToast(a.label);
+      } else if (layerHeld) {
+        layerHeld--;
+      }
+      continue;
+    }
 
     if (a.type == ACT_LIGHTS) {
       // Tap = next light mode. Hold + turn the knob = brightness (see handleKnob).
@@ -752,6 +839,8 @@ void handleKeys(uint32_t now) {
 
   // Onboard button: cycle screen brightness bright -> dim -> off
   if (updateButton(io14Button, now) && io14Button.stable) {
+    lastActivity = now;
+    pcLocked = false;
     brightnessIdx = (brightnessIdx + 1) % BRIGHT_STEPS;
     setBacklight(backlightFor(brightnessIdx));
   }
@@ -761,6 +850,7 @@ void handleKnob(uint32_t now) {
   bool alive = helperAlive(now);
 
   int32_t clicks = takeEncoderClicks();
+  if (clicks != 0) lastActivity = now;
   // Light settings are locked during the start-up show: turns are then swallowed.
   if (clicks != 0 && colourKeyHeld) {
     // Fun 2 held: the knob picks the colour for "Key glow" and "One colour"
@@ -984,18 +1074,21 @@ void applyDisplay() {
   dirty = true;
 }
 
-bool applyKeyLine(char **f, int n) {
+// K|key|type|code|mods|label (layer 1), K2|... (layer 2), O|... (profile, not saved)
+bool applyKeyLine(char **f, int n, KeyAction *into = actions, uint16_t *mask = nullptr) {
   long key, type, code, mods;
   if (n != 6 || !parseInt(f[1], 0, KEY_COUNT - 1, key) || !parseInt(f[2], 0, ACT_TYPE_COUNT - 1, type) ||
       !parseInt(f[3], 0, 0xFFFF, code) || !parseInt(f[4], 0, 0xFF, mods))
     return false;
   if ((type == ACT_KEY || type == ACT_COLOUR) && code > 0xFF) return false;   // keyboard codes are one byte
+  if (into == actions2 && (type == ACT_LAYER || type == ACT_LIGHTS || type == ACT_COLOUR)) return false;
   KeyAction a;
   a.type = (ActionType)type;
   a.code = (uint16_t)code;
   a.mods = (uint8_t)mods;
   copyLabel(a.label, sizeof(a.label), f[5]);
-  actions[key] = a;
+  into[key] = a;
+  if (mask) *mask |= (uint16_t)(1u << key);
   return true;
 }
 
@@ -1033,6 +1126,18 @@ bool applyConfigLine(char *line) {
   long v;
   if (line[0] == 'K' && line[1] == '|') {
     return applyKeyLine(f, splitFields(line, f, 6));
+  }
+  if (line[0] == 'K' && line[1] == '2' && line[2] == '|') {
+    return applyKeyLine(f, splitFields(line, f, 6), actions2);
+  }
+  if (line[0] == 'N' && line[1] == '|') {       // N|owner name for the welcome
+    copyLabel(ownerName, sizeof(ownerName), line + 2);
+    return true;
+  }
+  if (line[0] == 'T' && line[1] == 'O' && line[2] == '|') {   // TO|minutes without a key until sleep
+    if (!parseInt(line + 3, 0, 240, v)) return false;
+    idleMinutes = (uint8_t)v;
+    return true;
   }
   if (line[0] == 'G' && line[1] == '|') {
     if (!parseInt(line + 2, 0, 1, v)) return false;
@@ -1084,6 +1189,9 @@ bool applyConfigLine(char *line) {
 // Everything the app can change, into flash (and loaded again at power-on).
 void saveSettings() {
   prefs.putBytes("keys", actions, sizeof(actions));
+  prefs.putBytes("keys2", actions2, sizeof(actions2));
+  prefs.putString("owner", ownerName);
+  prefs.putUChar("idle", idleMinutes);
   prefs.putBytes("schemes", schemes, sizeof(schemes));
   prefs.putUChar("bmask", builtinMask);
   prefs.putUChar("lang", padLang);
@@ -1109,6 +1217,18 @@ void loadSettings() {
       if (stored[i].type < ACT_TYPE_COUNT) actions[i] = stored[i];   // anything odd: keep the default
     }
   }
+  for (auto &a : actions2) a = NO_ACTION;
+  if (prefs.getBytesLength("keys2") == sizeof(actions2)) {
+    KeyAction stored[KEY_COUNT];
+    prefs.getBytes("keys2", stored, sizeof(stored));
+    for (int i = 0; i < KEY_COUNT; i++) {
+      stored[i].label[sizeof(stored[i].label) - 1] = '\0';
+      if (stored[i].type < ACT_TYPE_COUNT && stored[i].type != ACT_LAYER) actions2[i] = stored[i];
+    }
+  }
+  prefs.getString("owner", ownerName, sizeof(ownerName));
+  idleMinutes = prefs.getUChar("idle", 0);
+  if (idleMinutes > 240) idleMinutes = 0;
   if (prefs.getBytesLength("schemes") == sizeof(schemes)) {
     prefs.getBytes("schemes", schemes, sizeof(schemes));
     for (auto &sc : schemes) {
@@ -1134,6 +1254,141 @@ void loadSettings() {
 }
 
 // A line that is not a music message: app settings, info request, update mode.
+// ---------------------------------------------------------------------------
+//  Own picture: stored in the flash area after the app (kept by firmware updates)
+// ---------------------------------------------------------------------------
+uint32_t crc32Update(uint32_t crc, const uint8_t *p, size_t n) {
+  crc = ~crc;
+  while (n--) {
+    crc ^= *p++;
+    for (int k = 0; k < 8; k++) crc = (crc >> 1) ^ (0xEDB88320UL & (0 - (crc & 1)));
+  }
+  return ~crc;
+}
+
+// The screen task must not read the picture while it changes
+void unmapPicture() {
+  bool locked = screenLock && xSemaphoreTake(screenLock, pdMS_TO_TICKS(500)) == pdTRUE;
+  effects.setPicture(nullptr, 0, 0, 0, 0);
+  if (picMap) {
+    esp_partition_munmap(picMapHandle);
+    picMap = nullptr;
+  }
+  if (locked) xSemaphoreGive(screenLock);
+}
+
+// Shows the stored picture (if there is a complete one)
+void loadPicture() {
+  if (!picPart) picPart = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_SPIFFS, nullptr);
+  unmapPicture();
+  memset(&picHeader, 0, sizeof(picHeader));
+  if (!picPart || esp_partition_read(picPart, 0, &picHeader, sizeof(picHeader)) != ESP_OK) return;
+  size_t bytes = (size_t)picHeader.w * picHeader.h * picHeader.frames * 2;
+  bool sizeOk = (picHeader.w == 320 && picHeader.h == 170) || (picHeader.w == 160 && picHeader.h == 85);
+  if (picHeader.magic != PIC_MAGIC || !sizeOk || !picHeader.frames || bytes + 16 > picPart->size) {
+    picHeader.magic = 0;
+    return;
+  }
+  if (esp_partition_mmap(picPart, 0, bytes + 16, ESP_PARTITION_MMAP_DATA, &picMap, &picMapHandle) != ESP_OK) {
+    picMap = nullptr;
+    return;
+  }
+  if (effectsReady) {
+    bool locked = screenLock && xSemaphoreTake(screenLock, pdMS_TO_TICKS(500)) == pdTRUE;
+    effects.setPicture((const uint16_t *)((const uint8_t *)picMap + 16), picHeader.w, picHeader.h, picHeader.frames,
+                       picHeader.delayMs);
+    if (locked) xSemaphoreGive(screenLock);
+  }
+}
+
+// IP = which picture is stored, IB|w|h|frames|delay|bytes = start (erases the area),
+// IC|offset|length + raw bytes = one part, IE|crc = done, IX = delete
+void handlePictureLine(char *line) {
+  char *f[8];
+  int n = splitFields(line, f, 7);
+  if (line[1] == 'P') {
+    Serial.printf("IP|%lu|%u\n", picHeader.magic == PIC_MAGIC ? (unsigned long)picHeader.crc : 0UL, picHeader.frames);
+    return;
+  }
+  if (!picPart) {
+    Serial.print("IA|0|no space\n");
+    return;
+  }
+  if (line[1] == 'X') {
+    unmapPicture();
+    esp_partition_erase_range(picPart, 0, 4096);
+    picHeader.magic = 0;
+    Serial.print("IA|1\n");
+    return;
+  }
+  if (line[1] == 'B') {
+    long w, h, frames, delayMs, bytes;
+    if (n != 6 || !parseInt(f[1], 160, 320, w) || !parseInt(f[2], 85, 170, h) || !parseInt(f[3], 1, 999, frames) ||
+        !parseInt(f[4], 20, 10000, delayMs) || !parseInt(f[5], 1, 0x7FFFFFFF, bytes) ||
+        bytes != w * h * frames * 2 || (size_t)bytes + 16 > picPart->size) {
+      Serial.print("IA|0|bad size\n");
+      return;
+    }
+    setToast(tr(T_PICTURE), C_DEEZER, C_TEXT);
+    unmapPicture();
+    size_t erase = ((size_t)bytes + 16 + 4095) & ~(size_t)4095;
+    if (esp_partition_erase_range(picPart, 0, erase) != ESP_OK) {
+      Serial.print("IA|0|erase\n");
+      return;
+    }
+    picHeader = {0, (uint16_t)w, (uint16_t)h, (uint16_t)frames, (uint16_t)delayMs, 0};
+    if (!picBuf) picBuf = (uint8_t *)malloc(4096);
+    Serial.print("IR\n");
+    return;
+  }
+  if (line[1] == 'C') {
+    long off, len;
+    if (n != 3 || !parseInt(f[1], 0, 0x7FFFFFFF, off) || !parseInt(f[2], 1, 4096, len) || !picBuf) {
+      Serial.print("IA|0|bad part\n");
+      return;
+    }
+    picOffset = (uint32_t)off;
+    picExpect = (uint32_t)len;
+    picGot = 0;
+    picLastByte = millis();
+    return;                                // the raw bytes follow (readSerial)
+  }
+  if (line[1] == 'E') {
+    unsigned long want = n == 2 ? strtoul(f[1], nullptr, 10) : 0;
+    size_t bytes = (size_t)picHeader.w * picHeader.h * picHeader.frames * 2;
+    uint32_t crc = 0;
+    uint8_t buf[512];
+    for (size_t pos = 0; pos < bytes; pos += sizeof(buf)) {
+      size_t k = min(sizeof(buf), bytes - pos);
+      esp_partition_read(picPart, 16 + pos, buf, k);
+      crc = crc32Update(crc, buf, k);
+    }
+    if (crc != want || !bytes) {
+      Serial.print("IA|0|crc\n");
+      return;
+    }
+    picHeader.magic = PIC_MAGIC;
+    picHeader.crc = crc;
+    esp_partition_write(picPart, 0, &picHeader, sizeof(picHeader));
+    loadPicture();
+    Serial.print("IA|1\n");
+  }
+}
+
+// raw bytes of one picture part, written to flash when complete
+void receivePictureBytes(size_t &budget) {
+  size_t n = min((size_t)Serial.available(), min((size_t)(picExpect - picGot), budget));
+  n = Serial.read(picBuf + picGot, n);
+  picGot += n;
+  if (n) picLastByte = millis();
+  budget -= n;
+  if (picGot >= picExpect) {
+    bool ok = esp_partition_write(picPart, 16 + picOffset, picBuf, picExpect) == ESP_OK;
+    Serial.printf("IK|%lu|%d\n", (unsigned long)picOffset, ok ? 1 : 0);
+    picExpect = 0;
+  }
+}
+
 void handleAppLine(char *line) {
   if (strcmp(line, "?") == 0) {
     sendInfo();
@@ -1150,14 +1405,71 @@ void handleAppLine(char *line) {
     Serial.flush();
     delay(200);
     usb_persist_restart(RESTART_BOOTLOADER);
+  } else if (line[0] == 'O' && line[1] == '|') {
+    // O|key|type|code|mods|label: the profile of the program in front; O|- = none
+    if (strcmp(line, "O|-") == 0) {
+      overlayMask = 0;
+    } else {
+      char *f[7];
+      applyKeyLine(f, splitFields(line, f, 6), overlay, &overlayMask);
+    }
+  } else if (line[0] == 'K' && line[1] == 'S' && line[2] == '|') {
+    // KS|type|code|mods: type this key for the app (macros, tap/hold)
+    char *f[5];
+    long type, code, mods;
+    if (splitFields(line, f, 4) == 4 && parseInt(f[1], 0, ACT_MEDIA, type) && parseInt(f[2], 0, 0xFFFF, code) &&
+        parseInt(f[3], 0, 0xFF, mods) && (type == ACT_MEDIA || code <= 0xFF))
+      tapForApp((uint8_t)type, (uint16_t)code, (uint8_t)mods);
+  } else if (line[0] == 'H' && line[1] == '|') {
+    // H|key|RRGGBB = this key's light, H|key|- = back to normal, H|- = all back
+    char *f[4];
+    long key;
+    int n = splitFields(line, f, 3);
+    if (n == 2 && strcmp(f[1], "-") == 0) {
+      highlightMask = 0;
+    } else if (n == 3 && parseInt(f[1], 0, KEY_COUNT - 1, key)) {
+      if (strcmp(f[2], "-") == 0) highlightMask &= ~(uint16_t)(1u << key);
+      else if (parseHexColour(f[2], highlightRGB[key])) highlightMask |= (uint16_t)(1u << key);
+    }
+  } else if (line[0] == 'S' && line[1] == 'L' && line[2] == '|') {
+    pcLocked = line[3] == '1';              // SL|1 = the PC is locked, SL|0 = back
+    if (!pcLocked) lastActivity = millis();
   } else if (line[0] == 'Z' && line[1] == '|') {
-    // Z|month from the app when it connects (for the "Seasons" background)
+    // Z|month[|local time in s since 1970] from the app (Seasons background, clock)
     long m;
-    char *f[3];
-    if (splitFields(line, f, 2) == 2 && parseInt(f[1], 1, 12, m) && m != padMonth) {
+    char *f[4];
+    int n = splitFields(line, f, 3);
+    if (n >= 2 && parseInt(f[1], 1, 12, m) && m != padMonth) {
       padMonth = (uint8_t)m;
       prefs.putUChar("month", padMonth);
     }
+    if (n == 3) {
+      unsigned long t = strtoul(f[2], nullptr, 10);
+      if (t > 1600000000UL) {
+        clockBase = (uint32_t)t;
+        clockAt = millis();
+      }
+    }
+  } else if (line[0] == 'Q' && line[1] == '|') {
+    // Q|cpu|ram|gpu|gpu temperature (-1 = unknown)
+    char *f[6];
+    long v[4];
+    if (splitFields(line, f, 5) == 5 && parseInt(f[1], -1, 100, v[0]) && parseInt(f[2], -1, 100, v[1]) &&
+        parseInt(f[3], -1, 100, v[2]) && parseInt(f[4], -1, 150, v[3])) {
+      pcCpu = v[0]; pcRam = v[1]; pcGpu = v[2]; pcGpuTemp = v[3];
+      statsAt = millis();
+    }
+  } else if (line[0] == 'U' && line[1] == '|') {
+    // U|seconds left|total|phase|round|paused: the focus timer (phase 0 = off)
+    char *f[7];
+    long v[5];
+    if (splitFields(line, f, 6) == 6 && parseInt(f[1], 0, 86400, v[0]) && parseInt(f[2], 0, 86400, v[1]) &&
+        parseInt(f[3], 0, 3, v[2]) && parseInt(f[4], 0, 9, v[3]) && parseInt(f[5], 0, 1, v[4])) {
+      timerLeft = v[0]; timerTotal = v[1]; timerPhase = v[2]; timerRound = v[3]; timerPaused = v[4];
+      timerAt = millis();
+    }
+  } else if (line[0] == 'I' && line[1] && (line[2] == '|' || line[2] == '\0') && strchr("BCEPX", line[1])) {
+    handlePictureLine(line);
   } else if (applyConfigLine(line)) {
     cfgAccepted++;
   } else if (line[0] && line[0] != 'S') {
@@ -1169,9 +1481,14 @@ void handleAppLine(char *line) {
 void readSerial() {
   uint32_t now = millis();
   if (coverExpect && now - coverLastByte > 1500) coverExpect = 0;  // transfer stuck: give up
+  if (picExpect && now - picLastByte > 2000) picExpect = 0;
   size_t budget = 8192;   // per loop pass, so keys stay quick while a cover comes in
   if (Serial.available() && lastHelperMsg != 0) lastHelperMsg = now;  // anything from the helper: still there
   while (budget && Serial.available()) {
+    if (picExpect) {
+      receivePictureBytes(budget);
+      continue;
+    }
     if (coverExpect) {
       // raw cover bytes
       size_t n = min((size_t)Serial.available(), min(coverExpect - coverGot, budget));
@@ -1399,7 +1716,27 @@ bool drawScreen(uint32_t now) {
   return animating;
 }
 
+// Sleep while the PC is locked / asleep, or after idleMinutes without a key
+void updateSleep(uint32_t now) {
+  bool idle = idleMinutes && msSince(now, lastActivity) > (int32_t)(idleMinutes * 60000UL);
+  bool sleep = !introActive(now) && (usbSuspended || (pcLocked && helperAlive(now)) || idle);
+  if (sleep == padAsleep) return;
+  padAsleep = sleep;
+  setBacklight(sleep ? 0 : backlightFor(brightnessIdx));
+  dirty = true;
+}
+
+void usbEvent(void *, esp_event_base_t base, int32_t id, void *) {
+  if (base != ARDUINO_USB_EVENTS) return;
+  if (id == ARDUINO_USB_SUSPEND_EVENT) usbSuspended = true;
+  else if (id == ARDUINO_USB_RESUME_EVENT) usbSuspended = false;
+}
+
 void updateScreen(uint32_t now) {
+  if (padAsleep) {                        // screen dark: nothing to draw
+    aquariumWanted = false;
+    return;
+  }
   bool alive = helperAlive(now);
   static bool musicWas = false;
   bool music = musicScreenWanted(now);
@@ -1473,13 +1810,41 @@ void drawGreeting(float t) {
   if (t <= IN || t >= OUT) return;
   float a = min(1.0f, (t - IN) / 0.3f) * min(1.0f, (OUT - t) / 0.4f);
   char first[48], third[48] = "";
-  if (OWNER_NAME[0]) snprintf(first, sizeof(first), "Welcome, %s!", OWNER_NAME);
+  const char *owner = ownerName[0] ? ownerName : OWNER_NAME;
+  if (owner[0]) snprintf(first, sizeof(first), "Welcome, %s!", owner);
   else strlcpy(first, "Welcome!", sizeof(first));
   if (MAKER_NAME[0]) snprintf(third, sizeof(third), "handcrafted by %s", MAKER_NAME);
   int16_t y = third[0] ? 40 : 51;
   y = greetLine(first, 3, y, 255, 255, 255, a) + 8;
   y = greetLine("to your Macro Pad", 2, y, 230, 244, 255, a) + 10;
   if (third[0]) greetLine(third, 2, y, 150, 220, 255, a);
+}
+
+// What the animated backgrounds and widgets need to know right now
+bgx::Inputs effectInputs() {
+  bgx::Inputs in;
+  uint32_t now = millis();
+  in.level = audioLevel;
+  in.accentHue = COLOURS[lightColour].hue;
+  in.accentSat = COLOURS[lightColour].sat;
+  in.month = padMonth;
+  in.lang = padLang;
+  if (clockBase) in.epoch = clockBase + (now - clockAt) / 1000;
+  if (statsAt && now - statsAt < 5000) {      // no fresh numbers: shown as unknown
+    in.cpu = pcCpu; in.ram = pcRam; in.gpu = pcGpu; in.gpuTemp = pcGpuTemp;
+  }
+  bool alive = helperAlive(now);
+  if (timerPhase && alive) {
+    float left = timerLeft - (timerPaused ? 0 : (now - timerAt) / 1000.0f);
+    in.timerLeft = left < 0 ? 0 : left;
+    in.timerTotal = timerTotal;
+    in.timerPhase = timerPhase;
+    in.timerRound = timerRound;
+    in.timerPaused = timerPaused;
+  } else if (!timerPhase) {
+    in.timerTotal = timerTotal;
+  }
+  return in;
 }
 
 void aquariumTask(void *) {
@@ -1518,13 +1883,10 @@ void aquariumTask(void *) {
           label[sizeof(label) - 1] = '\0';
           effects.poke(label);
         }
-        bgx::Inputs in;
-        in.level = audioLevel;
-        in.accentHue = COLOURS[lightColour].hue;
-        in.accentSat = COLOURS[lightColour].sat;
-        in.month = padMonth;
+        bgx::Inputs in = effectInputs();
         effects.update(dt, in);
         effects.render();
+        effects.drawTimerBadge(gfx->getFramebuffer(), in);
       } else {
         if (pressed) tank.feed();
         bool night = brightnessIdx == BRIGHT_DIM;   // dimmed screen = night in the aquarium
@@ -1532,6 +1894,7 @@ void aquariumTask(void *) {
         if (tank.introRunning()) tank.setIntroTime((millis() - introStart) / 1000.0f);
         tank.update(dt);
         tank.render();
+        if (effectsReady && timerPhase) effects.drawTimerBadge(gfx->getFramebuffer(), effectInputs());
       }
       uint32_t now = millis();
       bool intro = introActive(now);
@@ -1566,6 +1929,7 @@ void startAquarium() {
   if (still) {
     effects.begin(gfx->getFramebuffer(), still, esp_random());
     effectsReady = true;
+    loadPicture();
   }
   if (STARTUP_ANIMATION) tank.startIntro();
   screenLock = xSemaphoreCreateMutex();
@@ -1737,6 +2101,14 @@ void updateLights(uint32_t now) {
     float x = UNDERGLOW_LEDS > 1 ? (float)u / (UNDERGLOW_LEDS - 1) : 0.5f;
     frame[KEY_COUNT + u] = intro ? introColor(x, 1.0f, -1, t, now) : lightColor(x, 1.0f, -1, now);
   }
+  if (highlightMask && !intro && helperAlive(now)) {   // key lights from the app, always visible
+    float k = LED_MAX / 255.0f * max((int)lightPct, 40) / 100.0f;
+    for (int i = 0; i < KEY_COUNT; i++)
+      if (highlightMask & (1u << i))
+        frame[KEY_LED[i]] = Adafruit_NeoPixel::Color(highlightRGB[i][0] * k, highlightRGB[i][1] * k, highlightRGB[i][2] * k);
+  }
+  if (padAsleep)
+    for (int i = 0; i < LED_COUNT; i++) frame[i] = 0;
   showLimited(frame);
 
   if (lightsNeedSave && msSince(now, lightsChangedAt) > 2000) {
@@ -1761,6 +2133,7 @@ void setup() {
   ConsumerControl.begin();
   USB.productName("ESP32 Macro Pad");
   USB.manufacturerName("DIY");
+  USB.onEvent(usbEvent);
   USB.begin();
 
   initMatrix();
@@ -1819,6 +2192,7 @@ void loop() {
   if (introLength && now - introStart >= introLength) introLength = 0;  // start-up show over, for good
   handleKeys(now);
   handleKnob(now);
+  updateSleep(now);
   updateScreen(now);
   updateLights(now);
   delay(1);

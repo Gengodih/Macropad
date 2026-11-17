@@ -13,10 +13,13 @@ An action is stored in the settings as a short id string:
 The pad gets (type, code, modifiers, label) for each key - see protocol.py.
 """
 
+import re
 from dataclasses import dataclass
 
 # Pad action types (ActionType in the firmware)
-T_KEY, T_MEDIA, T_LIGHTS, T_COLOUR, T_NONE = 0, 1, 2, 3, 4
+T_KEY, T_MEDIA, T_LIGHTS, T_COLOUR, T_NONE, T_APP, T_LAYER = 0, 1, 2, 3, 4, 5, 6
+# T_APP: the app does it (macro, tap/hold, microphone); the pad only reports the press.
+# T_LAYER: hold for layer 2.
 
 # Modifier bits (same as the firmware)
 CTRL, SHIFT, ALT, WIN = 0x01, 0x02, 0x04, 0x08
@@ -119,7 +122,19 @@ SPECIAL = {
     "none": ("Nothing", "Nichts"),
     "lights": ("Light key", "Licht-Taste"),
     "fun2": ("Fun 2 (colour key)", "Fun 2 (Farb-Taste)"),
+    "layer": ("Layer 2 (hold)", "Ebene 2 (halten)"),
 }
+# Done by the app ("app:<name>")
+APP_ACTIONS = {
+    "mic_mute": ("Microphone on/off", "Mikrofon an/aus"),
+    "timer": ("Focus timer start/pause", "Fokus-Timer Start/Pause"),
+    "timer_skip": ("Focus timer skip/stop", "Fokus-Timer weiter/stopp"),
+}
+# Own macros ("macro:<id>") and tap/hold/double-tap keys ("multi:<id>") live in
+# the settings; their names come from there (names = {action id: name}).
+REF_KINDS = ("macro", "multi")
+_REF_ID = re.compile(r"^[a-z0-9]{1,8}$")
+GENERIC_NAMES = {"macro": ("Macro", "Makro"), "multi": ("Tap / hold", "Tippen / Halten")}
 
 # Default layout (key 0-14, row by row), as in the app design:
 #   F13  F14  F15  F16  F17
@@ -152,6 +167,8 @@ def combo_id(mods: int, key_name: str) -> str:
 
 
 def is_valid(action_id) -> bool:
+    """Known action id (macros / tap-hold keys only by their form - whether they
+    exist is checked by config.validate)."""
     try:
         resolve(action_id)
         return True
@@ -159,12 +176,35 @@ def is_valid(action_id) -> bool:
         return False
 
 
-def label(action_id: str, lang: str = "en") -> str:
+def is_pad_action(action_id) -> bool:
+    """A key the pad itself can type (keyboard key, shortcut, own combo, media key)."""
+    return str(action_id).partition(":")[0] in ("key", "sc", "combo", "media") and is_valid(action_id)
+
+
+def is_ref(action_id) -> bool:
+    return str(action_id).partition(":")[0] in REF_KINDS
+
+
+def ref_id(action_id) -> str:
+    return str(action_id).partition(":")[2]
+
+
+def valid_ref_id(rid) -> bool:
+    return isinstance(rid, str) and bool(_REF_ID.match(rid))
+
+
+def label(action_id: str, lang: str = "en", names: dict | None = None) -> str:
     """Name of an action for the app and the pad's screen."""
     de = lang == "de"
     kind, _, rest = str(action_id).partition(":")
     if kind in SPECIAL and not rest:
         return SPECIAL[kind][1 if de else 0]
+    if kind == "app":
+        return APP_ACTIONS[rest][1 if de else 0]
+    if kind in REF_KINDS:
+        if not valid_ref_id(rest):
+            raise ValueError(f"bad id {action_id!r}")
+        return (names or {}).get(action_id) or GENERIC_NAMES[kind][1 if de else 0]
     if kind == "key":
         k = KEYS_BY_NAME[rest]
         return k.de if de else k.en
@@ -201,12 +241,16 @@ def _parse_combo(rest: str):
     return mods, key
 
 
-def resolve(action_id: str, lang: str = "en") -> PadAction:
+def resolve(action_id: str, lang: str = "en", names: dict | None = None) -> PadAction:
     """Action id -> what the pad needs. Raises ValueError for unknown ids."""
     if not isinstance(action_id, str):
         raise TypeError("action id must be text")
     kind, _, rest = action_id.partition(":")
-    text = label(action_id, lang)
+    text = label(action_id, lang, names)
+    if kind == "layer" and not rest:
+        return PadAction(T_LAYER, 0, 0, text)
+    if kind == "app" or kind in REF_KINDS:
+        return PadAction(T_APP, 0, 0, text)
     if kind == "none" and not rest:
         return PadAction(T_NONE, 0, 0, "")
     if kind == "lights" and not rest:
@@ -226,11 +270,21 @@ def resolve(action_id: str, lang: str = "en") -> PadAction:
     raise ValueError(f"unknown action {action_id!r}")
 
 
-def short_label(action_id: str, lang: str = "en") -> str:
+def short_label(action_id: str, lang: str = "en", names: dict | None = None) -> str:
     """Very short text for the key buttons in the app (fits on a key cap)."""
     kind, _, rest = str(action_id).partition(":")
     if kind == "none":
         return "—"
+    if kind == "layer":
+        return "⇧ 2"
+    if kind == "app" and rest == "mic_mute":
+        return "\U0001F3A4"
+    if kind == "app" and rest == "timer":
+        return "\u23EF\u23F1"
+    if kind == "app" and rest == "timer_skip":
+        return "\u23ED\u23F1"
+    if kind in REF_KINDS:
+        return label(action_id, lang, names)
     if kind == "lights":
         return "\U0001F4A1"
     if kind == "fun2":

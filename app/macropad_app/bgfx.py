@@ -33,7 +33,7 @@ def _load():
     try:
         lib = ctypes.CDLL(str(path))
         lib.bgfx_version.restype = ctypes.c_int
-        if lib.bgfx_version() != 1 or lib.bgfx_width() != W or lib.bgfx_height() != H:
+        if lib.bgfx_version() != 2 or lib.bgfx_width() != W or lib.bgfx_height() != H:
             raise OSError("unexpected library version")
         lib.bgfx_new.restype = ctypes.c_void_p
         lib.bgfx_new.argtypes = [ctypes.c_uint32]
@@ -43,6 +43,12 @@ def _load():
         lib.bgfx_update.argtypes = [ctypes.c_void_p, ctypes.c_float, ctypes.c_float,
                                     ctypes.c_int, ctypes.c_int, ctypes.c_int]
         lib.bgfx_render.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        f = ctypes.c_float
+        lib.bgfx_set_info.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int, f, f, f, f, f, f,
+                                      ctypes.c_int, ctypes.c_int, ctypes.c_int]
+        lib.bgfx_set_picture.restype = ctypes.c_int
+        lib.bgfx_set_picture.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int, ctypes.c_int,
+                                         ctypes.c_int, ctypes.c_int]
         _lib = lib
     except (OSError, AttributeError) as e:
         log.warning("Animated backgrounds not available (%s): %s", path, e)
@@ -74,6 +80,15 @@ class Renderer:
     def update(self, dt: float, level: float = 0.0, colour: int = 11, month: int = 0):
         hue, sat = LIGHT_HUES[colour] if 0 <= colour < len(LIGHT_HUES) else LIGHT_HUES[11]
         self._lib.bgfx_update(self._h, float(dt), float(level), hue, sat, int(month))
+
+    def set_info(self, epoch=0, lang=0, cpu=-1, ram=-1, gpu=-1, gpu_temp=-1,
+                 timer_left=0.0, timer_total=0.0, timer_phase=0, timer_round=0, timer_paused=False):
+        self._lib.bgfx_set_info(self._h, int(epoch) & 0xFFFFFFFF, int(lang), float(cpu), float(ram), float(gpu),
+                                float(gpu_temp), float(timer_left), float(timer_total), int(timer_phase),
+                                int(timer_round), int(bool(timer_paused)))
+
+    def set_picture(self, pixels: bytes | None, w=320, h=170, frames=1, delay_ms=100) -> bool:
+        return bool(self._lib.bgfx_set_picture(self._h, pixels, w, h, frames, delay_ms))
 
     def frame(self) -> QImage:
         self._lib.bgfx_render(self._h, self._buf)

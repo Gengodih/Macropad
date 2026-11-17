@@ -38,6 +38,10 @@ def learned_file() -> Path:
     return user_dir() / "learned_apps.json"
 
 
+def stats_file() -> Path:
+    return user_dir() / "stats.json"
+
+
 def downloads_dir() -> Path:
     d = user_dir() / "downloads"
     d.mkdir(parents=True, exist_ok=True)

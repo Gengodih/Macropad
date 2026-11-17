@@ -16,14 +16,14 @@ def cut(start, end):
 
 parts = [
     cut("enum ActionType : uint8_t", "// What each key does right now"),
-    "KeyAction actions[KEY_COUNT];\n",
+    cut("// What each key does right now", "const KeyAction ACTION_BOOT"),
     cut("// Lights\nenum LightMode", "// Colours for \"Key glow\""),
     cut("struct NamedColour", "// Screen settings (from the app)"),
     cut("// Screen settings (from the app)", "\n\n// Settings messages from the app"),
     "uint16_t cfgAccepted = 0, cfgRejected = 0;\n",
     cut("// Name of a light mode in the pad's language", "bool helperAlive(uint32_t now)"),
     cut("// Splits \"a|b|c\" in place.", "void sendInfo() {"),
-    cut("bool applyKeyLine(char **f, int n) {", "// Everything the app can change, into flash"),
+    cut("// K|key|type|code|mods|label (layer 1)", "// Everything the app can change, into flash"),
 ]
 harness = r'''
 #include <cstdio>
@@ -40,9 +40,11 @@ const uint8_t KEY_COUNT = 15, ROWS = 3, COLS = 5;
 const uint8_t HID_F13 = 0x68, HID_F14 = 0x69, HID_F15 = 0x6A, HID_F16 = 0x6B, HID_F17 = 0x6C, HID_F18 = 0x6D,
   HID_F19 = 0x6E, HID_F20 = 0x6F, HID_F21 = 0x70, HID_F22 = 0x71, HID_F23 = 0x72, HID_F24 = 0x73;
 uint8_t lightMode = 0, lightPct = 60, lightColour = 11;
-bool dirty = false; bool aquariumReady = false; uint8_t brightnessIdx = 0;
+bool dirty = false; bool aquariumReady = false; uint8_t brightnessIdx = 0; uint8_t idleMinutes = 0;
 struct { bool showFish; } tank;
 void setBacklight(uint8_t) {}
+struct esp_partition_t { uint32_t size; };
+typedef uint32_t esp_partition_mmap_handle_t;
 #define strlcpy my_strlcpy
 static size_t my_strlcpy(char *d, const char *s, size_t n) { size_t l = strlen(s); if (n) { size_t c = l < n - 1 ? l : n - 1; memcpy(d, s, c); d[c] = 0; } return l; }
 template<class T> T constrain(T v, T lo, T hi) { return v < lo ? lo : v > hi ? hi : v; }
@@ -52,6 +54,7 @@ void applyDisplay() { dirty = true; }
 @@APPLY@@
 int main() {
   memcpy(actions, DEFAULT_ACTIONS, sizeof(actions));
+  for (auto &a : actions2) a = NO_ACTION;
   char line[400];
   while (fgets(line, sizeof line, stdin)) {
     size_t n = strlen(line); while (n && (line[n-1] == '\n' || line[n-1] == '\r')) line[--n] = 0;
@@ -62,14 +65,16 @@ int main() {
   printf("LANG %u BG %u FISH %d LEVEL %u MUSIC %d OPT %u\n", padLang, bgAnim, showFish, screenLevel, showMusic, bgOptions);
   printf("LIGHT %u %u %u MASK %u\n", lightMode, lightPct, lightColour, builtinMask);
   for (int i = 0; i < KEY_COUNT; i++) printf("KEY %d %u %u %u %s\n", i, actions[i].type, actions[i].code, actions[i].mods, actions[i].label);
+  for (int i = 0; i < KEY_COUNT; i++) printf("KEY2 %d %u %u %u %s\n", i, actions2[i].type, actions2[i].code, actions2[i].mods, actions2[i].label);
+  printf("OWNER %s IDLE %u\n", ownerName, idleMinutes);
   for (int i = 0; i < MAX_SCHEMES; i++) if (schemes[i].used) printf("SCHEME %d %u %s %02X%02X%02X %02X%02X%02X\n", i, schemes[i].effect, schemes[i].name,
        schemes[i].rgb[0][0], schemes[i].rgb[0][1], schemes[i].rgb[0][2], schemes[i].rgb[14][0], schemes[i].rgb[14][1], schemes[i].rgb[14][2]);
   return 0;
 }
 '''
 apply_fn = cut("// One settings message. Returns false", "// Everything the app can change, into flash")
-body = "\n".join(p for p in parts if not p.startswith("bool applyKeyLine"))
-key_and_scheme = cut("bool applyKeyLine(char **f, int n) {", "// One settings message. Returns false")
+body = "\n".join(p for p in parts if not p.startswith("// K|key|type"))
+key_and_scheme = cut("// K|key|type|code|mods|label (layer 1)", "// One settings message. Returns false")
 src = harness.replace("@@PARTS@@", body).replace("@@APPLY@@", key_and_scheme + apply_fn)
 src = src.replace("const char *tr(Txt t)", "const char *tr_unused(Txt t)")
 
@@ -134,6 +139,12 @@ for name, opts, want in (("fire", {"beat": True, "fox": True}, 3), ("fire", {"be
     out = run(exe, b"".join(lines) + protocol.SAVE)
     check(f"background {name} {opts}", f"ACK {len(lines)} 0" in out and
           f"BG {config.PAD_BACKGROUND[name]} FISH 1 LEVEL 16 MUSIC 1 OPT {want}" in out, out[:300])
+for name in ("clock", "stats", "timer", "picture"):
+    s = config.defaults()
+    s["display"]["background"] = name
+    lines = protocol.settings_lines(s, proto=4)
+    out = run(exe, b"".join(lines) + protocol.SAVE)
+    check(f"widget {name}", f"ACK {len(lines)} 0" in out and f"BG {config.PAD_BACKGROUND[name]} " in out, out[:300])
 # an old pad (settings protocol 1) gets five fields and the aquarium instead
 s = config.defaults()
 s["display"]["background"] = "space"
@@ -142,12 +153,30 @@ check("old pad gets 5 fields", line == b"D|0|1|16|1\n", line)
 out = run(exe, line + protocol.SAVE)
 check("5-field D still accepted", "ACK 1 0" in out and "BG 0 FISH 1" in out, out[:200])
 
+# 2c. app keys, layer 2, welcome name, sleep timer
+s = config.defaults()
+s["macros"] = {"m1": {"name": "Mail", "steps": [{"type": "text", "text": "hi"}]}}
+s["multi"] = {"t1": {"name": "CopyPaste", "tap": "sc:copy", "hold": "sc:paste", "double": "none"}}
+s["keys"][0] = "macro:m1"; s["keys"][1] = "multi:t1"; s["keys"][2] = "layer"; s["keys"][3] = "app:mic_mute"
+s["keys2"][5] = "key:A"; s["keys2"][6] = "macro:m1"
+s["owner_name"] = "Jörg"; s["sleep"]["idle_minutes"] = 15
+lines = protocol.settings_lines(s)
+out = run(exe, b"".join(lines) + protocol.SAVE)
+check("app keys + layer 2 accepted", f"ACK {len(lines)} 0" in out, out[:400])
+check("macro key = app type", "KEY 0 5 0 0 Mail" in out and "KEY 1 5 0 0 CopyPaste" in out, out)
+check("layer key", "KEY 2 6 0 0 " in out and "KEY 3 5 0 0 " in out, out)
+check("layer 2 keys", "KEY2 5 0 4 0 A" in out and "KEY2 6 5 0 0 Mail" in out and "KEY2 0 4 0 0 " in out, out)
+check("owner + idle", "OWNER J\x94rg IDLE 15" in out, out)
+old = protocol.settings_lines(s, proto=2)
+check("old pad: app keys become defaults", b"K|0|0|104|0|F13\n" in old and not any(l.startswith(b"K2|") for l in old), old[:3])
+
 # 3. broken / hostile lines are rejected, nothing crashes
 bad = [b"K|15|0|1|0|x\n", b"K|0|9|1|0|x\n", b"K|0|0|300|0|x\n", b"K|0|0|1\n", b"K|-1|0|1|0|x\n",
-       b"G|2\n", b"D|0|1|0|1\n", b"D|9|1|5|1\n", b"D|2|1|5|1|256\n", b"D|2|1|5|1|3|9\n", b"D|2|1|5\n", b"LM|99\n", b"LB|5\n", b"LB|abc\n", b"LP|16\n",
+       b"G|2\n", b"D|0|1|0|1\n", b"D|13|1|5|1\n", b"D|2|1|5|1|256\n", b"D|2|1|5|1|3|9\n", b"D|2|1|5\n", b"LM|99\n", b"LB|5\n", b"LB|abc\n", b"LP|16\n",
        b"LS|10|0|x|" + b",".join([b"FFFFFF"] * 15) + b"\n", b"LS|0|0|x|FFFFFF\n",
        b"LS|0|0|x|" + b",".join([b"GGGGGG"] * 15) + b"\n", b"LS|0|0|x|" + b",".join([b"FFFFFF"] * 16) + b"\n",
-       b"LM|8\n", b"X\n", b"K|0|0|1|0|" + b"A" * 200 + b"\n"]
+       b"LM|8\n", b"X\n", b"K2|0|6|0|0|x\n", b"K2|0|2|0|0|x\n", b"K2|15|0|1|0|x\n", b"K|0|7|0|0|x\n",
+       b"TO|241\n", b"TO|x\n", b"K|0|0|1|0|" + b"A" * 200 + b"\n"]
 out = run(exe, b"".join(bad) + protocol.SAVE)
 m = re.search(r"ACK (\d+) (\d+)", out)
 check("hostile lines", m and m.group(1) == "1" and m.group(2) == str(len(bad) - 1), out[:800])

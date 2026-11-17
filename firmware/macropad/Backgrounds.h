@@ -14,6 +14,8 @@
 
 #pragma once
 #include "Aquarium.h"
+#include <cstdio>
+#include <cstring>
 
 #if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC push_options
@@ -38,7 +40,7 @@ using aq::toC8;
 // Background numbers, the same as BgAnim in the sketch and in the app
 enum Kind : uint8_t {
   AQUARIUM = 0, PLAIN = 1, SYNTHWAVE = 2, LAVA = 3, SPACE = 4, FIRE = 5, MATRIX = 6, RAIN = 7,
-  SEASONS = 8, KIND_COUNT = 9
+  SEASONS = 8, CLOCK = 9, STATS = 10, TIMER = 11, PICTURE = 12, KIND_COUNT = 13
 };
 
 // Option bits (from the app). Seasons keeps its season in bits 1-3:
@@ -46,14 +48,36 @@ enum Kind : uint8_t {
 constexpr uint8_t OPT_A = 0x01;   // Synthwave: pulse with the music, Lava: light colour,
                                   // Space: rocket on key press, Fire: dance to the music,
                                   // Matrix: key names fall along, Rain: thunderstorm
-constexpr uint8_t OPT_B = 0x02;   // Fire: a sleepy fox by the fire
+constexpr uint8_t OPT_B = 0x02;   // Fire: a sleepy fox by the fire, Clock: 12-hour time
+// Clock OPT_A: seconds bar, Stats OPT_A: history graph
 
 struct Inputs {
   float level = 0;          // music loudness 0-1 (smoothed)
   uint16_t accentHue = 0;   // the light colour (Adafruit hue scale) for "Lava: light colour"
   uint8_t accentSat = 255;
   uint8_t month = 0;        // 1-12 from the PC, 0 = unknown
+  uint32_t epoch = 0;       // local time in seconds since 1970 (from the PC), 0 = unknown
+  uint8_t lang = 0;         // 0 English, 1 German
+  float cpu = -1, ram = -1, gpu = -1, gpuTemp = -1;   // PC stats in %, degrees C; -1 = unknown
+  float timerLeft = 0, timerTotal = 0;                // focus timer, seconds
+  uint8_t timerPhase = 0;   // 0 off, 1 focus, 2 break, 3 long break
+  uint8_t timerRound = 0;   // 1-4
+  bool timerPaused = false;
 };
+
+// Date from days since 1970 (H. Hinnant's civil_from_days)
+inline void civilFromDays(int32_t z, int &y, unsigned &m, unsigned &d) {
+  z += 719468;
+  const int32_t era = (z >= 0 ? z : z - 146096) / 146097;
+  const unsigned doe = (unsigned)(z - era * 146097);
+  const unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+  y = (int)yoe + era * 400;
+  const unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+  const unsigned mp = (5 * doy + 2) / 153;
+  d = doy - (153 * mp + 2) / 5 + 1;
+  m = mp < 10 ? mp + 3 : mp - 9;
+  y += (m <= 2);
+}
 
 // Classic 5x7 font (Adafruit GFX), ASCII 32-126: 5 columns per character, bit 0 = top row
 static const uint8_t FONT5x7[95 * 5] = {
@@ -147,6 +171,7 @@ class Effects {
         break;
       case SEASONS: gust_ += 60; break;
       case SYNTHWAVE: kick_ = 1.0f; break;
+      case CLOCK: case TIMER: pulse_ = 1.0f; break;
       case RAIN: drops(3); break;
       default: break;
     }
@@ -166,8 +191,41 @@ class Effects {
       case MATRIX: updateMatrix(dt); break;
       case RAIN: updateRain(dt); break;
       case SEASONS: updateSeasons(dt); break;
+      case CLOCK: case STATS: case TIMER: case PICTURE: updateWidget(dt); break;
       default: break;
     }
+  }
+
+  // Own picture (from the app, in flash): w x h pixels per frame, 320x170 or 160x85
+  void setPicture(const uint16_t *pixels, uint16_t w, uint16_t h, uint16_t frames, uint16_t delayMs) {
+    pic_ = pixels;
+    picW_ = w;
+    picH_ = h;
+    picFrames_ = frames ? frames : 1;
+    picDelay_ = delayMs < 20 ? 100 : delayMs;
+    picFrame_ = 0;
+    picT_ = 0;
+  }
+
+  // While a focus timer runs: a small timer in the corner of any other background
+  void drawTimerBadge(uint16_t *frame, const Inputs &in) {
+    if (!in.timerPhase || kind_ == TIMER) return;
+    aq::Canvas c;
+    c.fb = frame;
+    int left = (int)(in.timerLeft + 0.99f);
+    if (left < 0) left = 0;
+    char buf[8];
+    snprintf(buf, sizeof(buf), "%02d:%02d", left / 60 % 100, left % 60);
+    const float x = 226, y = 6, w = 88, h = 24;
+    c.fillRect(x + 4, y, w - 8, h, {10, 10, 20}, 0.7f);
+    c.fillCircle(x + 4, y + h / 2, h / 2, {10, 10, 20}, 0.7f);
+    c.fillCircle(x + w - 4, y + h / 2, h / 2, {10, 10, 20}, 0.7f);
+    Col dot = in.timerPaused ? Col{150, 150, 170} : (in.timerPhase == 1 ? Col{255, 90, 70} : Col{80, 220, 140});
+    c.fillCircle(x + 10, y + h / 2, 5, dot, 1.0f);
+    aq::Canvas keep = cv_;
+    cv_ = c;
+    text(buf, x + 22, y + 5, 2, {245, 245, 255}, 1.0f);
+    cv_ = keep;
   }
 
   void render() {
@@ -179,6 +237,10 @@ class Effects {
       case MATRIX: renderMatrix(); break;
       case RAIN: renderRain(); break;
       case SEASONS: renderSeasons(); break;
+      case CLOCK: renderClock(); break;
+      case STATS: renderStats(); break;
+      case TIMER: renderTimer(); break;
+      case PICTURE: renderPicture(); break;
       default:
         for (int i = 0; i < W * H; i++) fb_[i] = 0;
         break;
@@ -258,6 +320,260 @@ class Effects {
     if (m >= 6 && m <= 8) return 2;
     if (m >= 9 && m <= 11) return 3;
     return 0;                                        // Dec-Feb, or date unknown
+  }
+
+
+  // =========================================================================
+  //  Widgets: clock, PC stats, focus timer, own picture
+  // =========================================================================
+  const uint16_t *pic_ = nullptr;
+  uint16_t picW_ = 0, picH_ = 0, picFrames_ = 1, picDelay_ = 100, picFrame_ = 0;
+  float picT_ = 0, histT_ = 0;
+  float cpuHist_[64], ramHist_[64];
+  uint8_t histN_ = 0;
+
+  // text in the 5x7 font, upper case, scaled
+  void text(const char *s, float x, float y, int scale, Col c, float a) {
+    for (; *s; s++, x += 6 * scale) {
+      char ch = *s;
+      if (ch >= 'a' && ch <= 'z') ch -= 32;
+      if (ch < 32 || ch > 126) ch = '?';
+      glyphBlend(ch, x, y, c, a, scale);
+    }
+  }
+  static float textW(const char *s, int scale) { return strlen(s) * 6.0f * scale - scale; }
+  void textC(const char *s, float cx, float y, int scale, Col c, float a) { text(s, cx - textW(s, scale) / 2, y, scale, c, a); }
+
+  // one seven-segment digit (0-9, or -1 = dash)
+  void seg(float x, float y, float len, float t, bool horizontal, Col c, float a) {
+    const float g = t * 0.18f, e = t / 2;
+    if (horizontal) {
+      cv_.fillRect(x + e + g, y, len - t - 2 * g, t, c, a);
+      cv_.fillTri(x + g, y + e, x + e + g, y, x + e + g, y + t, c, a);
+      cv_.fillTri(x + len - g, y + e, x + len - e - g, y, x + len - e - g, y + t, c, a);
+    } else {
+      cv_.fillRect(x, y + e + g, t, len - t - 2 * g, c, a);
+      cv_.fillTri(x + e, y + g, x, y + e + g, x + t, y + e + g, c, a);
+      cv_.fillTri(x + e, y + len - g, x, y + len - e - g, x + t, y + len - e - g, c, a);
+    }
+  }
+  void digit7(int d, float x, float y, float w, float h, float t, Col on, float offA) {
+    static const uint8_t SEGS[10] = {0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F};
+    uint8_t m = d < 0 ? 0x40 : SEGS[d % 10];
+    const float hh = (h - t) / 2;
+    struct S { float x, y, len; bool hor; } S7[7] = {
+        {x, y, w, true}, {x + w - t, y, hh + t, false}, {x + w - t, y + hh, hh + t, false},
+        {x, y + 2 * hh, w, true}, {x, y + hh, hh + t, false}, {x, y, hh + t, false}, {x, y + hh, w, true}};
+    for (int i = 0; i < 7; i++) {
+      bool lit = m & (1 << i);
+      if (!lit && offA <= 0) continue;
+      seg(S7[i].x, S7[i].y, S7[i].len, t, S7[i].hor, on, lit ? 1.0f : offA);
+    }
+  }
+  // an arc of round dots (angles in degrees, 0 = right, clockwise)
+  void arc(float cx, float cy, float r, float th, float a0, float a1, Col c, float a) {
+    float len = fabsf(a1 - a0) * PI_F / 180 * r;
+    int n = (int)(len / (th * 0.35f)) + 2;
+    for (int i = 0; i <= n; i++) {
+      float ang = (a0 + (a1 - a0) * i / n) * PI_F / 180;
+      cv_.fillCircle(cx + cosf(ang) * r, cy + sinf(ang) * r, th / 2, c, a);
+    }
+  }
+  Col accent() const { return hsv(in_.accentHue, in_.accentSat > 200 ? 200 : in_.accentSat, 255); }
+
+  void updateWidget(float dt) {
+    pulse_ = fmaxf(0, pulse_ - dt * 2);
+    if (kind_ == STATS && (histT_ -= dt) <= 0) {        // one history point a second
+      histT_ = 1;
+      if (histN_ == 64) {
+        memmove(cpuHist_, cpuHist_ + 1, 63 * sizeof(float));
+        memmove(ramHist_, ramHist_ + 1, 63 * sizeof(float));
+        histN_ = 63;
+      }
+      cpuHist_[histN_] = in_.cpu;
+      ramHist_[histN_] = in_.ram;
+      histN_++;
+    }
+    if (kind_ == PICTURE && pic_ && picFrames_ > 1) {
+      picT_ += dt * 1000;
+      while (picT_ >= picDelay_) {
+        picT_ -= picDelay_;
+        picFrame_ = (picFrame_ + 1) % picFrames_;
+      }
+    }
+  }
+  void widgetBackground(Col top, Col bottom) {
+    verticalGradient(0, H, top, bottom);
+    // two slow, soft glows
+    float x1 = 160 + 120 * sinf(t_ * 0.07f), y1 = 85 + 50 * sinf(t_ * 0.05f + 1);
+    float x2 = 160 + 120 * sinf(t_ * 0.05f + 2.5f), y2 = 85 + 50 * cosf(t_ * 0.06f);
+    Col a = accent();
+    cv_.fillCircle(x1, y1, 90, a, 0.05f);
+    cv_.fillCircle(x2, y2, 70, mix(a, {255, 255, 255}, 0.3f), 0.04f);
+  }
+
+  void renderClock() {
+    widgetBackground({10, 8, 26}, {28, 10, 46});
+    const bool de = in_.lang == 1;
+    Col on = mix(accent(), {255, 255, 255}, 0.25f + 0.3f * pulse_);
+    if (!in_.epoch) {
+      for (int i = 0; i < 4; i++) digit7(-1, 31 + i * 64 + (i >= 2 ? 16 : 0), 24, 50, 86, 10, on, 0.06f);
+      textC(de ? "VERBINDE DIE APP" : "CONNECT THE APP", 160, 138, 2, {200, 200, 220}, 0.8f);
+      return;
+    }
+    uint32_t e = in_.epoch;
+    int32_t days = (int32_t)(e / 86400);
+    uint32_t sod = e % 86400;
+    int hour = sod / 3600, minute = sod / 60 % 60, second = sod % 60;
+    bool h12 = opts_ & OPT_B;
+    int shown = h12 ? (hour % 12 == 0 ? 12 : hour % 12) : hour;
+    float x = 31, y = 24;
+    int dd[4] = {shown / 10, shown % 10, minute / 10, minute % 10};
+    for (int i = 0; i < 4; i++) {
+      if (i == 0 && h12 && dd[0] == 0) {
+        x += 64;
+        continue;                                  // no leading zero for 12-hour time
+      }
+      digit7(dd[i], x, y, 50, 86, 10, on, 0.06f);
+      x += 64;
+      if (i == 1) {                                // blinking colon
+        float a = second % 2 ? 0.25f : 1.0f;
+        cv_.fillRect(x - 6, y + 22, 9, 9, on, a);
+        cv_.fillRect(x - 6, y + 56, 9, 9, on, a);
+        x += 16;
+      }
+    }
+    if (h12) text(hour < 12 ? "AM" : "PM", 290, 26, 1, on, 0.9f);
+    if (opts_ & OPT_A) {                           // seconds bar
+      cv_.fillRect(60, 122, 200, 3, {255, 255, 255}, 0.12f);
+      cv_.fillRect(60, 122, 200 * (second + 1) / 60.0f, 3, on, 0.9f);
+    }
+    int y_;
+    unsigned m, d;
+    civilFromDays(days, y_, m, d);
+    int wd = (int)((days + 3) % 7);                // 0 = Monday
+    static const char *WD_EN[7] = {"MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"};
+    static const char *WD_DE[7] = {"MO", "DI", "MI", "DO", "FR", "SA", "SO"};
+    static const char *MO_EN[12] = {"JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"};
+    static const char *MO_DE[12] = {"JAN", "FEB", "MRZ", "APR", "MAI", "JUN", "JUL", "AUG", "SEP", "OKT", "NOV", "DEZ"};
+    char buf[24];
+    if (de) snprintf(buf, sizeof(buf), "%s %u. %s", WD_DE[wd], d, MO_DE[(m - 1) % 12]);
+    else snprintf(buf, sizeof(buf), "%s %u %s", WD_EN[wd], d, MO_EN[(m - 1) % 12]);
+    textC(buf, 160, 136, 2, {220, 220, 240}, 0.95f);
+  }
+
+  void gauge(float cx, float cy, float value, float maxv, const char *labelText, const char *unit) {
+    const float r = 28, th = 7;
+    arc(cx, cy, r, th, 135, 405, {255, 255, 255}, 0.10f);
+    char buf[8];
+    if (value < 0) {
+      textC("--", cx, cy - 7, 2, {160, 160, 180}, 0.8f);
+    } else {
+      float f = clampf(value / maxv, 0, 1);
+      Col c = f < 0.6f ? mix({80, 220, 140}, {250, 210, 80}, f / 0.6f) : mix({250, 210, 80}, {255, 80, 80}, (f - 0.6f) / 0.4f);
+      if (f > 0.005f) arc(cx, cy, r, th, 135, 135 + 270 * f, c, 1.0f);
+      snprintf(buf, sizeof(buf), "%d%s", (int)(value + 0.5f), unit);
+      textC(buf, cx, cy - 7, 2, {245, 245, 255}, 1.0f);
+    }
+    textC(labelText, cx, cy + 26, 1, {200, 200, 220}, 0.9f);
+  }
+  void renderStats() {
+    widgetBackground({8, 14, 26}, {14, 24, 40});
+    const float y = 44;
+    gauge(43, y, in_.cpu, 100, "CPU", "%");
+    gauge(121, y, in_.ram, 100, "RAM", "%");
+    gauge(199, y, in_.gpu, 100, "GPU", "%");
+    gauge(277, y, in_.gpuTemp, 100, in_.lang ? "GPU TEMP" : "GPU TEMP", "C");
+    if (!(opts_ & OPT_A)) {
+      if (in_.cpu < 0) textC(in_.lang ? "VERBINDE DIE APP" : "CONNECT THE APP", 160, 130, 2, {200, 200, 220}, 0.8f);
+      return;
+    }
+    // history: the last minute of CPU (accent) and RAM (white)
+    const float gx = 16, gy = 98, gw = 288, gh = 60;
+    cv_.fillRect(gx, gy, gw, gh, {0, 0, 0}, 0.25f);
+    for (int k = 1; k < 4; k++) cv_.fillRect(gx, gy + gh * k / 4, gw, 1, {255, 255, 255}, 0.06f);
+    Col a = accent();
+    for (int series = 0; series < 2; series++) {
+      const float *h = series ? ramHist_ : cpuHist_;
+      Col c = series ? Col{230, 230, 245} : a;
+      for (int i = 1; i < histN_; i++) {
+        if (h[i - 1] < 0 || h[i] < 0) continue;
+        float x0 = gx + gw - (histN_ - i) * gw / 63.0f, x1 = x0 + gw / 63.0f;
+        float y0 = gy + gh - h[i - 1] / 100 * gh, y1 = gy + gh - h[i] / 100 * gh;
+        line(x0, y0, x1, y1, c, series ? 0.6f : 1.0f);
+        if (!series)
+          for (float yy = fmaxf(y0, y1); yy < gy + gh; yy += 1) cv_.blend((int)x1, (int)yy, c, 0.12f);
+      }
+    }
+    text("CPU", gx + 4, gy + 3, 1, a, 0.9f);
+    text("RAM", gx + 28, gy + 3, 1, {230, 230, 245}, 0.7f);
+  }
+
+  void renderTimer() {
+    const bool de = in_.lang == 1;
+    const uint8_t ph = in_.timerPhase;
+    Col top, bottom, ring;
+    if (ph == 1) { top = {50, 12, 18}; bottom = {24, 6, 12}; ring = {255, 96, 72}; }
+    else if (ph >= 2) { top = {8, 40, 32}; bottom = {4, 18, 16}; ring = {80, 220, 150}; }
+    else { top = {16, 16, 30}; bottom = {10, 10, 20}; ring = accent(); }
+    if (in_.timerPaused) ring = mix(ring, {150, 150, 170}, 0.6f);
+    widgetBackground(top, bottom);
+    const float cx = 78, cy = 85, r = 58, th = 10;
+    arc(cx, cy, r, th, 0, 360, {255, 255, 255}, 0.08f);
+    float frac = (ph && in_.timerTotal > 0) ? clampf(in_.timerLeft / in_.timerTotal, 0, 1) : 1.0f;
+    if (frac > 0.002f) arc(cx, cy, r, th, -90, -90 + 360 * frac, ring, 1.0f);
+    cv_.fillCircle(cx, cy, 34 + 3 * pulse_, ring, 0.10f + 0.10f * (in_.timerPaused ? 0 : 0.5f + 0.5f * sinf(t_ * 2)));
+    int left = ph ? (int)(in_.timerLeft + 0.99f) : (int)(in_.timerTotal + 0.5f);
+    if (left < 0) left = 0;
+    int mm = left / 60 % 100, ss = left % 60;
+    Col on = mix(ring, {255, 255, 255}, 0.35f);
+    float x = 168, y = 50;
+    int dd[4] = {mm / 10, mm % 10, ss / 10, ss % 10};
+    for (int i = 0; i < 4; i++) {
+      digit7(dd[i], x, y, 26, 50, 7, on, 0.06f);
+      x += 33;
+      if (i == 1) {
+        cv_.fillRect(x - 4, y + 13, 6, 6, on, 1.0f);
+        cv_.fillRect(x - 4, y + 31, 6, 6, on, 1.0f);
+        x += 9;
+      }
+    }
+    const char *lab;
+    if (in_.timerPaused) lab = de ? "ANGEHALTEN" : "PAUSED";
+    else if (ph == 1) lab = de ? "FOKUS" : "FOCUS";
+    else if (ph == 2) lab = de ? "PAUSE" : "BREAK";
+    else if (ph == 3) lab = de ? "LANGE PAUSE" : "LONG BREAK";
+    else lab = de ? "BEREIT" : "READY";
+    textC(lab, 240, 24, 2, {240, 240, 250}, 0.95f);
+    if (ph) {
+      for (int i = 0; i < 4; i++) {
+        float dx = 210 + i * 20;
+        bool done = i < in_.timerRound - (ph == 1 ? 1 : 0);
+        cv_.fillCircle(dx, 128, 5, done || (i == in_.timerRound - 1 && ph == 1) ? ring : Col{255, 255, 255},
+                       done ? 1.0f : (i == in_.timerRound - 1 && ph == 1 ? 0.5f : 0.15f));
+      }
+    } else {
+      textC(de ? "TIMER-TASTE DRUECKEN" : "PRESS YOUR TIMER KEY", 240, 124, 1, {200, 200, 220}, 0.8f);
+    }
+  }
+
+  void renderPicture() {
+    if (!pic_) {
+      verticalGradient(0, H, {16, 16, 28}, {8, 8, 16});
+      textC(in_.lang ? "NOCH KEIN BILD" : "NO PICTURE YET", 160, 70, 2, {220, 220, 235}, 0.9f);
+      textC(in_.lang ? "IN DER APP AUSWAEHLEN" : "CHOOSE ONE IN THE APP", 160, 96, 1, {170, 170, 190}, 0.8f);
+      return;
+    }
+    const uint16_t *f = pic_ + (size_t)picFrame_ * picW_ * picH_;
+    if (picW_ == W && picH_ == H) {
+      memcpy(fb_, f, W * H * 2);
+    } else {                                       // half size: every pixel twice
+      for (int y = 0; y < H; y++) {
+        const uint16_t *src = f + (size_t)(y * picH_ / H) * picW_;
+        uint16_t *dst = fb_ + y * W;
+        for (int x = 0; x < W; x++) dst[x] = src[x * picW_ / W];
+      }
+    }
   }
 
   // =========================================================================

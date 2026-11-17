@@ -16,13 +16,20 @@ from ..device import PadLink
 from ..i18n import T, set_language
 from . import dialogs, theme
 from .background import Background
-from .pages import DisplayPage, GuidePage, HomePage, KeysPage, LanguagePage, LedsPage, SettingsPage, UpdatePage
+from .. import focus, picture
+from ..actions import ActionRunner
+from ..pcstats import PcStats
+from ..stats import KeyStats
+from .scenes import live
+from .pages import (DisplayPage, GuidePage, HomePage, KeysPage, LanguagePage, LedsPage, SettingsPage, StatsPage,
+                    UpdatePage)
 from .widgets import StatusBox, ToggleSwitch, label
 
 log = logging.getLogger("macropad.ui")
 
 MENU = [("home", HomePage), ("keys", KeysPage), ("leds", LedsPage), ("language", LanguagePage),
-        ("update", UpdatePage), ("guide", GuidePage), ("display", DisplayPage), ("settings", SettingsPage)]
+        ("update", UpdatePage), ("guide", GuidePage), ("display", DisplayPage), ("stats", StatsPage),
+        ("settings", SettingsPage)]
 
 
 def app_icon() -> QIcon:
@@ -77,6 +84,24 @@ class MainWindow(QMainWindow):
         self.repair_needed = False
         self.repair_release = None
         self._cancel = threading.Event()
+        self.stats = KeyStats(paths.stats_file())
+        import os
+        import sys
+        self._own_exe = os.path.basename(sys.executable).lower()
+        self.active_profile = None        # index of the profile for the program in front
+        self.program = ""                 # that program
+        self.locked = False
+        self.mic_muted = None
+        self.runner = ActionRunner(self.link, lambda: (self.settings.data, self.active_profile), self,
+                                   on_app=self._app_action)
+        self.focus = focus.FocusTimer(settings.data["display"]["options"]["timer"], self)
+        self.pcstats = None               # started when first needed
+        self.picture_pending = False      # a new own picture waits for Apply
+        self._upload_dialog = None
+        self._clock_sent = 0.0
+        live.lang = 1 if settings.data["pad_language"] == "de" else 0
+        live.timer = (self.focus.left, self.focus.total, 0, 0, False)
+        live.set_picture(picture.load())
         try:
             self.bundle = flasher.load_bundle()
         except flasher.FlashError as e:
@@ -97,6 +122,17 @@ class MainWindow(QMainWindow):
         self._update_timer = QTimer(self)
         self._update_timer.timeout.connect(self._periodic)
         self._update_timer.start(60 * 60 * 1000)
+        self._watch_timer = QTimer(self)          # program in front (profiles), lock screen
+        self._watch_timer.timeout.connect(self._watch)
+        self._watch_timer.start(500)
+        self._stats_timer = QTimer(self)
+        self._stats_timer.timeout.connect(self.stats.flush)
+        self._stats_timer.start(30000)
+        self._second = QTimer(self)               # PC stats and the clock for the widgets
+        self._second.timeout.connect(self._each_second)
+        self._second.start(1000)
+        self.focus.changed.connect(self._focus_changed)
+        self.focus.phase_ended.connect(self._focus_phase_ended)
         if not start_hidden:
             self.show()
 
@@ -251,6 +287,10 @@ class MainWindow(QMainWindow):
 
     def _shutdown(self):
         try:
+            self.stats.flush()
+        except Exception:
+            pass
+        try:
             self.link.stop()
         except Exception:
             pass
@@ -266,6 +306,10 @@ class MainWindow(QMainWindow):
         self.link.now_playing.connect(self._now_playing)
         self.link.music_state.connect(self._music_state)
         self.link.music_level.connect(self._music_level)
+        self.link.key_event.connect(self._key_event)
+        self.link.mic_muted.connect(self._mic_changed)
+        self.link.picture_progress.connect(self._picture_progress)
+        self.link.picture_done.connect(self._picture_done)
         b = self.bridge
         b.update_checked.connect(self._update_checked)
         b.download_progress.connect(lambda f, s: self._progress and self._progress.set_progress(f, s))
@@ -287,6 +331,130 @@ class MainWindow(QMainWindow):
         status = "busy" if (self.applying or self.flashing) else self.link_status
         self.status_box.set_status(status, T({"connected": "st_connected", "searching": "st_searching",
                                               "busy": "st_busy", "disconnected": "st_disconnected"}[status]))
+
+    # ----- keys, profiles, microphone, lock --------------------------------------
+    def _key_event(self, key, down, layer2, app):
+        if down:
+            self.stats.count(key, layer2)
+            self.background.poke()                    # the app's background reacts too
+        self.runner.key_event(key, down, layer2, app)
+
+    def _watch(self):
+        program = winsys.foreground_program()
+        own = program and program == getattr(self, "_own_exe", None)
+        if program and not own and program != self.program:
+            self.program = program
+            profile = config.active_profile(self.settings.data, program)
+            if profile != self.active_profile:
+                self.active_profile = profile
+                self._send_pad_state(overlay=True, lights=True, lock=False)
+                page = self.pages.get("keys")
+                if page is not None and page.isVisible():
+                    page.refresh()
+        locked = winsys.screen_locked() if self.settings.data["sleep"]["when_locked"] else False
+        if locked != self.locked:
+            self.locked = locked
+            self._send_pad_state(overlay=False, lights=False, lock=True)
+
+    # ----- widgets: PC stats, clock, focus timer, own picture ---------------------
+    def _proto4(self):
+        return self.link_status == "connected" and self._pad_proto() >= 4
+
+    def _each_second(self):
+        s = self.settings.data["display"]
+        on_pad = self._proto4() and s["animation"] and s["background"] == "stats"
+        page = self.pages.get("display")
+        previews = page is not None and page.isVisible() and self.draft["display"]["animation"]
+        in_app = self.background.mode == "native" and self.draft["display"]["background"] == "stats"
+        if on_pad or previews or in_app:
+            if self.pcstats is None:
+                self.pcstats = PcStats()
+            live.stats = self.pcstats.sample()
+            if on_pad:
+                self.link.send([protocol.stats_line(*live.stats)])
+        now = time.monotonic()
+        if self._proto4() and now - self._clock_sent > 600:      # keeps the pad's clock right
+            self._clock_sent = now
+            self.link.send([protocol.month_line(time.localtime().tm_mon, protocol.local_epoch())])
+
+    def _app_action(self, name):
+        if name == "timer":
+            self.focus.toggle()
+        elif name == "timer_skip":
+            self.focus.skip()
+
+    def _focus_changed(self):
+        f = self.focus
+        live.timer = (f.left, f.total, f.phase, f.round, f.paused)
+        if self._proto4():
+            self.link.send([protocol.timer_line(f.left, f.total, f.phase, f.round, f.paused)])
+
+    def _focus_phase_ended(self, ended, new):
+        if self.tray is not None:
+            text = T("timer_break_now") if new in (focus.BREAK, focus.LONG_BREAK) else T("timer_focus_now")
+            self.tray.showMessage(T("app_title"), text, app_icon(), 5000)
+
+    def picture_changed(self):
+        self.picture_pending = True
+        self.changed()
+
+    def _upload_picture_if_needed(self):
+        pic = live.picture
+        s = self.settings.data["display"]
+        if pic is None or not self._proto4():
+            return
+        if self.picture_pending or (s["animation"] and s["background"] == "picture"):
+            self.link.upload_picture(pic)
+
+    def _picture_progress(self, done, total):
+        if self._upload_dialog is None:
+            self._upload_dialog = dialogs.ProgressDialog(self, T("pic_upload"))
+            self._upload_dialog.set_stage(T("pic_upload_stage"))
+            self._upload_dialog.cancel_requested.connect(self.link.cancel_picture)
+            self._upload_dialog.open()
+            self._upload_start = time.monotonic()
+        frac = done / total if total else 0
+        elapsed = time.monotonic() - self._upload_start
+        self._upload_dialog.set_progress(frac, elapsed / frac - elapsed if frac > 0.05 else None)
+
+    def _picture_done(self, ok, why):
+        if ok:
+            self.picture_pending = False
+            self.changed()
+        else:
+            log.info("Picture not sent: %s", why)
+        if self._upload_dialog is not None:
+            self._upload_dialog.finish(T("pic_sent") if ok else T("pic_not_sent", why=why))
+            self._upload_dialog = None
+        elif not ok and why not in ("cancelled", "not connected"):
+            dialogs.info(self, T("pic_not_sent", why=why))
+
+    def _mic_changed(self, state):
+        self.mic_muted = state
+        self._send_pad_state(overlay=False, lights=True, lock=False)
+
+    def _send_pad_state(self, overlay=True, lights=True, lock=True):
+        """What the pad keeps only in memory: the profile, key lights, lock state."""
+        if self.link_status != "connected" or self._pad_proto() < 3:
+            return
+        s = self.settings.data
+        lines = []
+        if overlay:
+            lines += protocol.overlay_lines(s, self.active_profile)
+        if lights:
+            lines.append(protocol.CLEAR_HIGHLIGHTS)
+            if self.mic_muted is not None:
+                layout = s["profiles"][self.active_profile]["keys"] if self.active_profile is not None else s["keys"]
+                for i, aid in enumerate(layout):
+                    if aid == "app:mic_mute":
+                        lines.append(protocol.highlight_line(i, "#FF0000" if self.mic_muted else "#00C853"))
+        if lock:
+            lines.append(protocol.locked_line(self.locked))
+            if self._pad_proto() >= 4:
+                f = self.focus
+                lines.append(protocol.timer_line(f.left, f.total, f.phase, f.round, f.paused))
+        if lines:
+            self.link.send(lines)
 
     def _music_level(self, level):
         self.background.set_level(level)
@@ -310,6 +478,7 @@ class MainWindow(QMainWindow):
                 self.link.apply(protocol.settings_lines(self.settings.data, self._pad_proto()))
             else:
                 self._adopt_pad_lights(info.mode, info.brightness, info.colour)
+            self._send_pad_state()
         self.pages["update"].refresh()
         self.pages["display"].refresh()
         if self.firmware_outdated:
@@ -366,7 +535,11 @@ class MainWindow(QMainWindow):
         return d
 
     def changed(self, refresh_pages=False):
-        dirty = self._user_part(self.draft) != self._user_part(self.settings.data)
+        if refresh_pages:
+            for page in self.pages.values():
+                page.refresh()
+        dirty = self._user_part(self.draft) != self._user_part(self.settings.data) or getattr(
+            self, "picture_pending", False)
         pending = self.settings.data["pad_sync_pending"]
         self.apply_btn.setEnabled((dirty or pending) and not self.applying and not self.flashing)
         self.unsaved.setText(T("unsaved_hint") if dirty else "")
@@ -404,6 +577,11 @@ class MainWindow(QMainWindow):
         if ok:
             self.settings.data["pad_sync_pending"] = False
             self.settings.save()
+            self.active_profile = config.active_profile(self.settings.data, self.program)
+            self._send_pad_state()
+            self.focus.set_minutes(self.settings.data["display"]["options"]["timer"])
+            live.lang = 1 if self.settings.data["pad_language"] == "de" else 0
+            self._upload_picture_if_needed()
         else:
             log.info("Apply failed: %s", detail)
         self.apply_btn.setText(T("apply"))
