@@ -201,9 +201,18 @@ class WindowTests(unittest.TestCase):
         w.link.apply = lambda lines: sent.append(lines)
         w._link_status("connected")
         w._pad_info(protocol.PadInfo("2.0.0", 1, 0, 0, 60, 11))
-        w.draft["display"]["background"] = "plain"
+        w.draft["display"]["animation"] = False
         w.changed()
         self.assertEqual(w.background.mode, "plain")         # live preview
+        w.draft["display"]["animation"] = True
+        w.draft["display"]["background"] = "fire"
+        w.changed()
+        self.assertEqual(w.background.mode, "native")
+        w.draft["display"]["background"] = "aquarium"
+        w.changed()
+        self.assertEqual(w.background.mode, "aquarium")
+        w.draft["display"]["animation"] = False
+        w.changed()
         w.apply()
         self.assertTrue(sent)
         self.assertEqual(w.status_box.text(), "Don't disconnect")

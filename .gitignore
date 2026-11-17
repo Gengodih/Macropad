@@ -6,3 +6,5 @@ dist/
 firmware/.pio/
 app/macropad_app/_build_info.py
 *.log
+app/macropad_app/resources/bgfx.dll
+app/macropad_app/resources/bgfx.so

@@ -45,6 +45,15 @@ def _selftest():
         t.join(30)
         if sys.platform == "win32" and not state.get("ok"):
             raise RuntimeError(f"music libraries missing in the build: {state.get('why')}")
+        from . import bgfx
+        if sys.platform == "win32" and not bgfx.available():
+            raise RuntimeError("background renderer (bgfx.dll) missing in the build")
+        if bgfx.available():
+            r = bgfx.Renderer(1)
+            r.select(5, 3)
+            r.update(0.1)
+            r.frame()
+            r.close()
         from .config import Settings
         from .ui import theme
         from .ui.main_window import MENU, MainWindow

@@ -64,9 +64,10 @@
 #include "esp32-hal-tinyusb.h"   // usb_persist_restart(): reboot into flash mode for updates
 
 // Firmware version, reported to the Macro Pad app (Update & Repair compares it).
-const char FW_VERSION[] = "2.0.0";
-const uint8_t PROTO_VERSION = 1;   // settings messages understood by this firmware
+const char FW_VERSION[] = "2.1.0";
+const uint8_t PROTO_VERSION = 2;   // settings messages understood by this firmware (2: more backgrounds)
 #include "Aquarium.h"   // the aquarium scene (second file in this sketch folder)
+#include "Backgrounds.h"   // the other animated backgrounds
 
 #if ARDUINO_USB_MODE
 #error "Set Tools > USB Mode to 'USB-OTG (TinyUSB)', otherwise the pad cannot act as a keyboard."
@@ -136,7 +137,7 @@ const int VOL_STEP = 2;
 const uint32_t DEBOUNCE_MS     = 5;
 const uint32_t HELPER_TIMEOUT  = 5000;  // nothing from the PC for this long = helper offline
 const uint32_t TOAST_MS        = 900;   // how long a key name stays on screen
-const bool AQUARIUM_WHEN_OFFLINE = true; // aquarium on the screen while the PC helper is off
+const bool AQUARIUM_WHEN_OFFLINE = true; // animated background (aquarium etc.) while no song is shown
 const uint32_t AQUARIUM_FRAME_MS = 25;  // at most 40 aquarium frames per second
 
 // HID usage codes (USB keyboard spec, page 0x07)
@@ -301,7 +302,11 @@ size_t rxLen = 0;
 aq::Aquarium tank;
 bool aquariumReady = false;              // PSRAM buffers were found at power-on
 volatile bool aquariumWanted = false;    // set by loop(): helper is off
-volatile uint8_t aquariumFeeds = 0;      // counts key presses -> fish food
+volatile uint8_t aquariumFeeds = 0;      // counts key presses -> fish food / pokes the other backgrounds
+bgx::Effects effects;                    // the other animated backgrounds (same task, same buffers)
+bool effectsReady = false;
+char pokeLabel[24] = "";                 // name of the last pressed key (Matrix shows it)
+portMUX_TYPE pokeMux = portMUX_INITIALIZER_UNLOCKED;
 uint32_t introStart = 0, introLength = 0; // start-up show, millis()
 SemaphoreHandle_t screenLock = nullptr;
 
@@ -367,9 +372,13 @@ const NamedColour COLOURS[] = {
 const uint8_t COLOUR_COUNT = sizeof(COLOURS) / sizeof(COLOURS[0]);
 
 // Screen settings (from the app)
-enum BgAnim : uint8_t { BG_AQUARIUM, BG_PLAIN, BG_COUNT };
+// The same numbers as bgx::Kind and the app. BG_PLAIN = no animation (the normal screen).
+enum BgAnim : uint8_t {
+  BG_AQUARIUM, BG_PLAIN, BG_SYNTHWAVE, BG_LAVA, BG_SPACE, BG_FIRE, BG_MATRIX, BG_RAIN, BG_SEASONS, BG_COUNT};
 uint8_t bgAnim = BG_AQUARIUM;    // background while no music screen is shown
 bool showFish = true;            // fish in the aquarium
+uint8_t bgOptions = 0x01;        // option bits of the other backgrounds (see Backgrounds.h)
+uint8_t padMonth = 0;            // 1-12 from the PC (for "Seasons"), kept in flash
 uint8_t screenLevel = 16;        // backlight when "bright", 1-16
 bool showMusic = true;           // music screen (cover, title, volume) while music plays
 
@@ -650,6 +659,14 @@ void tapMedia(uint16_t code) {
 //  Input handling
 // ============================================================================
 
+// A key was pressed: the background task feeds the fish or pokes its animation
+void notePress(const char *label) {
+  taskENTER_CRITICAL(&pokeMux);
+  strlcpy(pokeLabel, label ? label : "", sizeof(pokeLabel));
+  taskEXIT_CRITICAL(&pokeMux);
+  aquariumFeeds = aquariumFeeds + 1;
+}
+
 void handleKeys(uint32_t now) {
   bool keyboardChanged = false;
   bool alive = helperAlive(now);
@@ -660,7 +677,7 @@ void handleKeys(uint32_t now) {
     if (keys[i].stable) {
       held[i] = actionFor(i, alive);      // remember what this press does
       keyPressedAt[i] = now;
-      aquariumFeeds = aquariumFeeds + 1;    // fish food, if the aquarium is showing
+      notePress(held[i].label);           // fish food / the animated background reacts
     }
     const KeyAction &a = held[i];
 
@@ -728,7 +745,7 @@ void handleKeys(uint32_t now) {
     keyboardChanged = true;
     if (bootButton.stable) {
       showToast(ACTION_BOOT.label);
-      aquariumFeeds = aquariumFeeds + 1;
+      notePress(ACTION_BOOT.label);
     }
   }
   if (keyboardChanged) sendKeyboardState();
@@ -1024,15 +1041,17 @@ bool applyConfigLine(char *line) {
     return true;
   }
   if (line[0] == 'D' && line[1] == '|') {
-    long bg, fish, level, music;
-    int n = splitFields(line, f, 5);
-    if (n != 5 || !parseInt(f[1], 0, BG_COUNT - 1, bg) || !parseInt(f[2], 0, 1, fish) ||
-        !parseInt(f[3], 1, 16, level) || !parseInt(f[4], 0, 1, music))
+    // D|background|fish|brightness|music[|options]
+    long bg, fish, level, music, opts = bgOptions;
+    int n = splitFields(line, f, 6);
+    if ((n != 5 && n != 6) || !parseInt(f[1], 0, BG_COUNT - 1, bg) || !parseInt(f[2], 0, 1, fish) ||
+        !parseInt(f[3], 1, 16, level) || !parseInt(f[4], 0, 1, music) || (n == 6 && !parseInt(f[5], 0, 0xFF, opts)))
       return false;
     bgAnim = (uint8_t)bg;
     showFish = fish;
     screenLevel = (uint8_t)level;
     showMusic = music;
+    bgOptions = (uint8_t)opts;
     applyDisplay();
     return true;
   }
@@ -1070,6 +1089,7 @@ void saveSettings() {
   prefs.putUChar("lang", padLang);
   prefs.putUChar("bg", bgAnim);
   prefs.putBool("fish", showFish);
+  prefs.putUChar("bgopt", bgOptions);
   prefs.putUChar("scr", screenLevel);
   prefs.putBool("music", showMusic);
   prefs.putUChar("mode", lightMode);
@@ -1101,6 +1121,9 @@ void loadSettings() {
   bgAnim = prefs.getUChar("bg", BG_AQUARIUM);
   if (bgAnim >= BG_COUNT) bgAnim = BG_AQUARIUM;
   showFish = prefs.getBool("fish", true);
+  bgOptions = prefs.getUChar("bgopt", 0x01);
+  padMonth = prefs.getUChar("month", 0);
+  if (padMonth > 12) padMonth = 0;
   screenLevel = constrain(prefs.getUChar("scr", 16), 1, 16);
   showMusic = prefs.getBool("music", true);
   lightMode = prefs.getUChar("mode", L_RAINBOW);
@@ -1127,6 +1150,14 @@ void handleAppLine(char *line) {
     Serial.flush();
     delay(200);
     usb_persist_restart(RESTART_BOOTLOADER);
+  } else if (line[0] == 'Z' && line[1] == '|') {
+    // Z|month from the app when it connects (for the "Seasons" background)
+    long m;
+    char *f[3];
+    if (splitFields(line, f, 2) == 2 && parseInt(f[1], 1, 12, m) && m != padMonth) {
+      padMonth = (uint8_t)m;
+      prefs.putUChar("month", padMonth);
+    }
   } else if (applyConfigLine(line)) {
     cfgAccepted++;
   } else if (line[0] && line[0] != 'S') {
@@ -1381,8 +1412,9 @@ void updateScreen(uint32_t now) {
   // Ours is redrawn once it is back.
   // Aquarium: during the start-up show, and whenever no song is shown (app off,
   // nothing playing, or the music screen switched off) - if chosen in the app.
+  bool animated = bgAnim == BG_AQUARIUM || (bgAnim != BG_PLAIN && effectsReady);
   aquariumWanted = aquariumReady &&
-                   (introActive(now) || (AQUARIUM_WHEN_OFFLINE && bgAnim == BG_AQUARIUM && !musicScreenWanted(now)));
+                   (introActive(now) || (AQUARIUM_WHEN_OFFLINE && animated && !musicScreenWanted(now)));
   if (aquariumWanted) {
     dirty = true;
     return;
@@ -1471,15 +1503,36 @@ void aquariumTask(void *) {
     xSemaphoreTake(screenLock, portMAX_DELAY);
     if (aquariumWanted) {
       uint8_t feeds = aquariumFeeds;
-      if (feeds != feedsSeen) {
-        feedsSeen = feeds;
-        tank.feed();
+      bool pressed = feeds != feedsSeen;
+      feedsSeen = feeds;
+      uint8_t bg = bgAnim;
+      bool other = effectsReady && bg != BG_AQUARIUM && bg != BG_PLAIN && !introActive(millis());
+      if (other) {
+        // one of the other backgrounds
+        effects.select(bg, bgOptions);
+        if (pressed) {
+          char label[sizeof(pokeLabel)];
+          taskENTER_CRITICAL(&pokeMux);
+          memcpy(label, pokeLabel, sizeof(label));
+          taskEXIT_CRITICAL(&pokeMux);
+          label[sizeof(label) - 1] = '\0';
+          effects.poke(label);
+        }
+        bgx::Inputs in;
+        in.level = audioLevel;
+        in.accentHue = COLOURS[lightColour].hue;
+        in.accentSat = COLOURS[lightColour].sat;
+        in.month = padMonth;
+        effects.update(dt, in);
+        effects.render();
+      } else {
+        if (pressed) tank.feed();
+        bool night = brightnessIdx == BRIGHT_DIM;   // dimmed screen = night in the aquarium
+        if (night != tank.isNight()) tank.toggleNight();
+        if (tank.introRunning()) tank.setIntroTime((millis() - introStart) / 1000.0f);
+        tank.update(dt);
+        tank.render();
       }
-      bool night = brightnessIdx == BRIGHT_DIM;   // dimmed screen = night in the aquarium
-      if (night != tank.isNight()) tank.toggleNight();
-      if (tank.introRunning()) tank.setIntroTime((millis() - introStart) / 1000.0f);
-      tank.update(dt);
-      tank.render();
       uint32_t now = millis();
       bool intro = introActive(now);
       if (intro) {
@@ -1508,6 +1561,12 @@ void startAquarium() {
   }
   tank.begin(gfx->getFramebuffer(), bufs[0], bufs[1], esp_random(), bufs[2], bufs[3]);
   tank.showFish = showFish;
+  // one more buffer for the other backgrounds (their still picture / the fire's heat)
+  uint16_t *still = (uint16_t *)ps_malloc(bytes);
+  if (still) {
+    effects.begin(gfx->getFramebuffer(), still, esp_random());
+    effectsReady = true;
+  }
   if (STARTUP_ANIMATION) tank.startIntro();
   screenLock = xSemaphoreCreateMutex();
   if (!screenLock) return;

@@ -57,9 +57,36 @@ def language_line(lang: str) -> bytes:
     return _line("G", 1 if lang == "de" else 0)
 
 
-def display_line(display: dict) -> bytes:
-    return _line("D", config.BACKGROUNDS.index(display["background"]), int(display["fish"]),
-                 display["brightness"], int(display["music"]))
+def background_options(name: str, options: dict) -> int:
+    """The option bits of one background, as the pad's Backgrounds.h reads them."""
+    o = options.get(name, {})
+    if name == "seasons":
+        return config.SEASONS.index(o.get("season", "auto")) << 1
+    if name == "fire":
+        return int(bool(o.get("beat"))) | int(bool(o.get("fox"))) << 1
+    if name == "aquarium":
+        return int(bool(o.get("fish", True)))
+    first = next(iter(config.BACKGROUND_OPTIONS[name]))
+    return int(bool(o.get(first)))
+
+
+def display_line(display: dict, proto: int = 2) -> bytes:
+    """D|background|fish|brightness|music|options. Firmware with settings
+    protocol 1 only knows the aquarium and "plain" (and five fields)."""
+    name = display["background"]
+    bg = config.PAD_BACKGROUND[name] if display["animation"] else config.PAD_PLAIN
+    fish = int(bool(display["options"]["aquarium"]["fish"]))
+    if proto < 2:
+        if bg not in (0, config.PAD_PLAIN):
+            bg = 0
+        return _line("D", bg, fish, display["brightness"], int(display["music"]))
+    return _line("D", bg, fish, display["brightness"], int(display["music"]),
+                 background_options(name, display["options"]))
+
+
+def month_line(month: int) -> bytes:
+    """Z|month - the date for the "Seasons" background (protocol 2 and newer)."""
+    return _line("Z", max(1, min(12, int(month))))
 
 
 def scheme_line(slot: int, scheme: dict | None) -> bytes:
@@ -79,14 +106,15 @@ def light_lines(lights: dict) -> list[bytes]:
     return lines
 
 
-def settings_lines(settings: dict) -> list[bytes]:
+def settings_lines(settings: dict, proto: int = 2) -> list[bytes]:
     """Every settings message for the pad, in a safe order (the light mode last,
-    because it may point at a scheme sent just before)."""
+    because it may point at a scheme sent just before). proto: the pad's
+    settings protocol (from its I| answer)."""
     settings = config.validate(settings)
     lang = settings["pad_language"]
     lines = [language_line(lang)]
     lines += [key_line(i, a, lang) for i, a in enumerate(settings["keys"])]
-    lines.append(display_line(settings["display"]))
+    lines.append(display_line(settings["display"], proto))
     lines += light_lines(settings["lights"])
     return lines
 

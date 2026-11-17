@@ -23,6 +23,15 @@ echo === Libraries ===
 %PY% -m pip install -r requirements.txt pyinstaller
 if errorlevel 1 goto :fail
 
+echo === Background previews (needs g++, e.g. from MSYS2 / MinGW-w64) ===
+where g++ >nul 2>&1
+if errorlevel 1 (
+  echo g++ not found - the app will show still backgrounds instead of the animated previews.
+) else (
+  %PY% tools\build_bgfx.py
+  if errorlevel 1 goto :fail
+)
+
 echo === Tests ===
 %PY% -m unittest discover -s tests
 if errorlevel 1 goto :fail

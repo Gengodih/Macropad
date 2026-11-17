@@ -25,6 +25,25 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.validate(d), d)
         self.assertEqual(d["keys"], keys.DEFAULT_LAYOUT)
 
+    def test_old_display_settings_move_over(self):
+        d = config.validate({"display": {"background": "aquarium", "fish": False, "brightness": 7, "music": True}})
+        self.assertTrue(d["display"]["animation"])
+        self.assertEqual(d["display"]["background"], "aquarium")
+        self.assertFalse(d["display"]["options"]["aquarium"]["fish"])
+        self.assertEqual(d["display"]["options"]["fire"], {"beat": True, "fox": True})
+        self.assertEqual(d["display"]["brightness"], 7)
+
+    def test_display_options_checked(self):
+        d = config.validate({"display": {"animation": True, "background": "volcano",
+                                         "options": {"seasons": {"season": "monsoon"}, "fire": {"fox": False, "x": 1},
+                                                     "rain": "wet"}}})
+        self.assertEqual(d["display"]["background"], "aquarium")
+        self.assertEqual(d["display"]["options"]["seasons"]["season"], "auto")
+        self.assertEqual(d["display"]["options"]["fire"], {"beat": True, "fox": False})
+        self.assertEqual(d["display"]["options"]["rain"], {"storm": True})
+        d = config.validate({"display": {"background": "seasons", "options": {"seasons": {"season": "winter"}}}})
+        self.assertEqual((d["display"]["background"], d["display"]["options"]["seasons"]["season"]), ("seasons", "winter"))
+
     def test_garbage_becomes_defaults(self):
         for junk in (None, 5, "x", [], {"keys": "no"}, {"lights": []}, {"display": {"brightness": "high"}}):
             self.assertEqual(config.validate(junk)["keys"], keys.DEFAULT_LAYOUT)
@@ -48,7 +67,11 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(s["effect"], "static")
         self.assertEqual(s["colours"][:2], ["#000000", "#abcdef"])
         self.assertEqual(len(s["colours"]), 15)
-        self.assertEqual(d["display"], {"background": "plain", "fish": True, "brightness": 16, "music": False})
+        self.assertFalse(d["display"]["animation"])           # 1.2 "plain" = animation off
+        self.assertEqual(d["display"]["background"], "aquarium")
+        self.assertTrue(d["display"]["options"]["aquarium"]["fish"])   # "yes" is no bool
+        self.assertEqual(d["display"]["brightness"], 16)
+        self.assertFalse(d["display"]["music"])
         self.assertEqual(d["updates"]["last_check"], 0.0)
 
     def test_mode_must_exist(self):
@@ -314,3 +337,40 @@ class FlasherTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RendererTests(unittest.TestCase):
+    """The pad's animations through the app's library (skipped if it is not built)."""
+
+    def setUp(self):
+        from macropad_app import bgfx
+        if not bgfx.available():
+            self.skipTest("bgfx library not built (python tools/build_bgfx.py)")
+        self.bgfx = bgfx
+
+    def test_every_background_draws(self):
+        from macropad_app import protocol
+        for name in config.BACKGROUNDS:
+            for options in (config.BACKGROUND_OPTIONS, {name: {k: (not v if isinstance(v, bool) else "winter")
+                                                               for k, v in config.BACKGROUND_OPTIONS[name].items()}}):
+                r = self.bgfx.Renderer(3)
+                r.select(config.PAD_BACKGROUND[name], protocol.background_options(name, options))
+                for i in range(40):
+                    if i in (5, 20):
+                        r.poke(["Copy", "Pläy/Ü", "x" * 80][i % 3])
+                    r.update(1 / 30, (i % 10) / 10, i % 16, 1 + i % 12)
+                img = r.frame()
+                self.assertEqual((img.width(), img.height()), (320, 170))
+                colours = {img.pixel(x, y) for x in range(0, 320, 16) for y in range(0, 170, 10)}
+                self.assertGreater(len(colours), 3, name)
+                r.close()
+
+    def test_odd_input_is_harmless(self):
+        r = self.bgfx.Renderer(0)
+        for kind, opts in ((-5, 0), (99, 255), (1, 0), (8, 255)):
+            r.select(kind, opts)
+            r.update(10.0, 5.0, 99, 77)
+            r.poke("")
+            r.frame()
+        r.close()
+        r.close()

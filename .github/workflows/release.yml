@@ -41,6 +41,19 @@ jobs:
         with:
           name: firmware
           path: firmware-bundle
+      # The pad's animations for the app's previews (bgfx.dll), cross-built for
+      # Windows from the same code as the firmware
+      - name: Build background renderer
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q g++-mingw-w64-x86-64-posix
+          python tools/build_bgfx.py --windows
+          python tools/build_bgfx.py
+          python tests/native/run_native.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bgfx
+          path: app/macropad_app/resources/bgfx.dll
 
   windows:
     needs: firmware
@@ -51,6 +64,10 @@ jobs:
         with:
           name: firmware
           path: app/macropad_app/resources/firmware
+      - uses: actions/download-artifact@v4
+        with:
+          name: bgfx
+          path: app/macropad_app/resources
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

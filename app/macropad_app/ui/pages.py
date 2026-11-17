@@ -1,6 +1,6 @@
 """The pages of the app (one per menu entry)."""
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QButtonGroup, QColorDialog, QComboBox, QGridLayout, QHBoxLayout, QLabel,
                                QListWidget, QListWidgetItem, QPushButton, QRadioButton, QScrollArea,
@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (QButtonGroup, QColorDialog, QComboBox, QGridLayou
 from .. import MAKER, VERSION, config, keys, paths
 from ..i18n import T, language
 from . import dialogs, theme
+from .scenes import OptionsPanel, PreviewTile
 from .widgets import Card, KeyCap, KnobIcon, Swatch, ToggleSwitch, label
 
 
@@ -454,60 +455,243 @@ class LanguagePage(Page):
 
 # ---------------------------------------------------------------------------
 class DisplayPage(Page):
+    """Animated background on/off, a catalog of live previews (click = choose),
+    the chosen background's options right under its row, then brightness/music."""
+
+    COLUMNS = 4
+    FPS = 15
+
     def build(self):
-        card = Card(T("disp_title"))
-        card.add(label(T("disp_bg")))
-        self.aq = QRadioButton(T("bg_aquarium"))
-        self.plain = QRadioButton(T("bg_plain"))
-        group = QButtonGroup(self)
-        group.addButton(self.aq)
-        group.addButton(self.plain)
+        card = Card(T("disp_bg"))
         r = QHBoxLayout()
-        r.addWidget(self.aq)
-        r.addWidget(self.plain)
-        r.addStretch()
+        self.anim = ToggleSwitch()
+        r.addWidget(self.anim)
+        r.addWidget(label(T("disp_anim")), 1)
         card.layout_.addLayout(r)
-        card.add(label(T("more_soon"), "Note"))
-        self.fish = ToggleSwitch()
+        self.anim_off_note = card.add(label(T("disp_anim_off"), "Note"))
+
+        self.catalog = QWidget()
+        self.catalog.setAttribute(Qt.WA_TranslucentBackground)
+        self.cat_layout = QVBoxLayout(self.catalog)
+        self.cat_layout.setContentsMargins(0, 4, 0, 0)
+        self.cat_layout.setSpacing(8)
+        self.tiles = {}
+        self.rows = []
+        names = config.BACKGROUNDS
+        for start in range(0, len(names), self.COLUMNS):
+            row = QWidget()
+            row.setAttribute(Qt.WA_TranslucentBackground)
+            h = QHBoxLayout(row)
+            h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(10)
+            for name in names[start:start + self.COLUMNS]:
+                tile = PreviewTile(name, T("bg_" + name))
+                tile.clicked.connect(self._tile_clicked)
+                self.tiles[name] = tile
+                h.addWidget(tile, 1)
+            for _ in range(self.COLUMNS - len(names[start:start + self.COLUMNS])):
+                h.addStretch(1)
+            self.rows.append(row)
+            self.cat_layout.addWidget(row)
+
+        self.panel = OptionsPanel()
+        pl = QVBoxLayout(self.panel)
+        pl.setContentsMargins(18, OptionsPanel.NOTCH + 12, 18, 14)
+        pl.setSpacing(8)
+        self.panel_title = QLabel()
+        self.panel_title.setObjectName("CardTitle")
+        self.panel_desc = label("", "Hint")
+        pl.addWidget(self.panel_title)
+        pl.addWidget(self.panel_desc)
+        self.panel_opts = QVBoxLayout()
+        self.panel_opts.setSpacing(8)
+        pl.addLayout(self.panel_opts)
+        self.panel_hint = label(T("disp_try"), "Note")
+        pl.addWidget(self.panel_hint)
+        self.fw_note = label(T("disp_needs_fw"), "Note")
+        self.fw_note.setStyleSheet("color: #fbbf24;")
+        pl.addWidget(self.fw_note)
+        self._panel_for = None
+        self._opt_widgets = {}
+        card.add(self.catalog)
+        self.col.addWidget(card)
+
+        screen = Card(T("disp_screen"))
+        r = QHBoxLayout()
         self.music = ToggleSwitch()
-        for sw, text in ((self.fish, T("disp_fish")), (self.music, T("disp_music"))):
-            r = QHBoxLayout()
-            r.addWidget(sw)
-            r.addWidget(label(text), 1)
-            card.layout_.addLayout(r)
-        card.add(label(T("disp_brightness")))
+        r.addWidget(self.music)
+        r.addWidget(label(T("disp_music")), 1)
+        screen.layout_.addLayout(r)
+        screen.add(label(T("disp_brightness")))
         self.bright = QSlider(Qt.Horizontal)
         self.bright.setRange(1, 16)
         self.bright_value = label("", "Hint", wrap=False)
         r = QHBoxLayout()
         r.addWidget(self.bright, 1)
         r.addWidget(self.bright_value)
-        card.layout_.addLayout(r)
-        card.add(label(T("disp_note"), "Note"))
-        self.col.addWidget(card)
-        self.aq.toggled.connect(self._changed)
-        self.fish.toggled.connect(self._changed)
+        screen.layout_.addLayout(r)
+        screen.add(label(T("disp_note"), "Note"))
+        self.col.addWidget(screen)
+
+        self.anim.toggled.connect(self._changed)
         self.music.toggled.connect(self._changed)
         self.bright.valueChanged.connect(self._changed)
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
 
+    # ----- live previews ------------------------------------------------------
+    def _animate(self):
+        want = self.isVisible() and self.draft["display"]["animation"]
+        if want and not self._timer.isActive():
+            self._timer.start(int(1000 / self.FPS))
+        elif not want and self._timer.isActive():
+            self._timer.stop()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        self._animate()
+
+    def hideEvent(self, e):
+        self._timer.stop()
+        super().hideEvent(e)
+
+    def _tick(self):
+        colour = self.draft["lights"]["colour"]
+        for tile in self.tiles.values():
+            tile.scene.step(1.0 / self.FPS, colour)
+            tile.update()
+        self._place_notch()
+
+    def set_level(self, level):
+        for tile in self.tiles.values():
+            tile.scene.set_level(level)
+
+    def _tile_clicked(self, name):
+        d = self.draft["display"]
+        if d["background"] == name:
+            self.tiles[name].scene.poke()          # chosen already: show how it reacts to a key
+            self.ctx.background.poke()
+            return
+        d["background"] = name
+        self.ctx.changed()
+        self.refresh()
+
+    # ----- options of the chosen background ----------------------------------
+    def _build_options(self, name):
+        def drop(w):
+            w.hide()                  # gone at once, deleted a moment later
+            w.setParent(None)
+            w.deleteLater()
+
+        while self.panel_opts.count():
+            item = self.panel_opts.takeAt(0)
+            if item.widget():
+                drop(item.widget())
+            elif item.layout():
+                lay = item.layout()
+                while lay.count():
+                    w = lay.takeAt(0).widget()
+                    if w:
+                        drop(w)
+                lay.deleteLater()
+        self._opt_widgets = {}
+        self.panel_title.setText(T("bg_" + name))
+        self.panel_desc.setText(T("bgd_" + name))
+        for key, default in config.BACKGROUND_OPTIONS[name].items():
+            if key == "season":
+                r = QHBoxLayout()
+                r.setSpacing(14)
+                group = QButtonGroup(self.panel)
+                buttons = {}
+                for season in config.SEASONS:
+                    b = QRadioButton(T("season_" + season))
+                    group.addButton(b)
+                    buttons[season] = b
+                    r.addWidget(b)
+                    b.toggled.connect(self._option_changed)
+                r.addStretch()
+                self.panel_opts.addLayout(r)
+                self._opt_widgets[key] = buttons
+            else:
+                r = QHBoxLayout()
+                sw = ToggleSwitch()
+                sw.toggled.connect(self._option_changed)
+                r.addWidget(sw)
+                r.addWidget(label(T(f"opt_{name}_{key}")), 1)
+                self.panel_opts.addLayout(r)
+                self._opt_widgets[key] = sw
+        self._panel_for = name
+
+    def _option_changed(self, *_):
+        d = self.draft["display"]
+        name = self._panel_for
+        if not name:
+            return
+        opts = d["options"][name]
+        for key, w in self._opt_widgets.items():
+            if key == "season":
+                for season, b in w.items():
+                    if b.isChecked():
+                        opts[key] = season
+            else:
+                opts[key] = w.isChecked()
+        self.ctx.changed()
+        self.refresh()
+
+    def _place_panel(self, name):
+        names = list(config.BACKGROUNDS)
+        row = names.index(name) // self.COLUMNS
+        self.cat_layout.removeWidget(self.panel)
+        self.cat_layout.insertWidget(row + 1, self.panel)
+        self.panel.show()
+        self._place_notch()
+
+    def _place_notch(self):
+        tile = self.tiles.get(self.draft["display"]["background"])
+        if tile is None or not self.panel.isVisible():
+            return
+        x = tile.mapTo(self.catalog, tile.rect().center()).x() - self.panel.x()
+        if abs(x - self.panel.notch_x) > 0.5:
+            self.panel.notch_x = x
+            self.panel.update()
+
+    # ----- settings -----------------------------------------------------------
     def refresh(self):
         d = self.draft["display"]
-        for w in (self.aq, self.plain, self.fish, self.music, self.bright):
+        name = d["background"]
+        for w in (self.anim, self.music, self.bright):
             w.blockSignals(True)
-        self.aq.setChecked(d["background"] == "aquarium")
-        self.plain.setChecked(d["background"] == "plain")
-        self.fish.setChecked(d["fish"])
-        self.fish.setEnabled(d["background"] == "aquarium")
+        self.anim.setChecked(d["animation"])
         self.music.setChecked(d["music"])
         self.bright.setValue(d["brightness"])
         self.bright_value.setText(f"{round(d['brightness'] / 16 * 100)} %")
-        for w in (self.aq, self.plain, self.fish, self.music, self.bright):
+        for w in (self.anim, self.music, self.bright):
             w.blockSignals(False)
+        self.catalog.setVisible(d["animation"])
+        self.anim_off_note.setVisible(not d["animation"])
+        for n, tile in self.tiles.items():
+            tile.set_selected(n == name)
+            tile.scene.configure(n, d["options"])
+        if self._panel_for != name:
+            self._build_options(name)
+        for key, w in self._opt_widgets.items():
+            value = d["options"][name][key]
+            if key == "season":
+                for season, b in w.items():
+                    b.blockSignals(True)
+                    b.setChecked(season == value)
+                    b.blockSignals(False)
+            else:
+                w.blockSignals(True)
+                w.setChecked(value)
+                w.blockSignals(False)
+        self.fw_note.setVisible(name != "aquarium" and bool(getattr(self.ctx, "firmware_outdated", False)))
+        self._place_panel(name)
+        self._animate()
 
     def _changed(self, *_):
         d = self.draft["display"]
-        d["background"] = "aquarium" if self.aq.isChecked() else "plain"
-        d["fish"] = self.fish.isChecked()
+        d["animation"] = self.anim.isChecked()
         d["music"] = self.music.isChecked()
         d["brightness"] = self.bright.value()
         self.ctx.changed()

@@ -1,5 +1,6 @@
 """The animated background of the content area - the same choice as the pad's
-screen: an aquarium (with or without fish) or a plain dark background."""
+screen: the aquarium (drawn here, sharp at any size), one of the other pad
+backgrounds (run by the pad's own code, see scenes.py) or a plain dark one."""
 
 import math
 import random
@@ -8,6 +9,8 @@ from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import (QBrush, QColor, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap,
                            QRadialGradient)
 from PySide6.QtWidgets import QWidget
+
+from .scenes import Scene
 
 FPS = 24
 
@@ -43,8 +46,11 @@ class Background(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WA_OpaquePaintEvent)
-        self.mode = "aquarium"
+        self.mode = "aquarium"          # aquarium, native (a pad scene) or plain
         self.fish_on = True
+        self.colour = 11                # the light colour (for "Lava lamp: light colour")
+        self._scene = None
+        self._key = None
         self._rnd = random.Random(7)
         self._t = 0.0
         self._static = None
@@ -55,15 +61,46 @@ class Background(QWidget):
         self._timer.timeout.connect(self._tick)
 
     # ----- settings ---------------------------------------------------------
-    def set_style(self, mode, fish):
-        self.mode = mode if mode in ("aquarium", "plain") else "aquarium"
-        self.fish_on = bool(fish)
+    def set_style(self, display, colour=11):
+        """display: the "display" settings. Does nothing if nothing changed."""
+        from .. import config
+        display = config.validate({"display": display})["display"]   # odd values: defaults
+        name = display["background"]
+        key = (display["animation"], name, repr(display["options"].get(name)), colour)
+        if key == self._key:
+            return
+        self._key = key
+        self.colour = colour
+        self.fish_on = bool(display["options"]["aquarium"]["fish"])
+        if not display["animation"]:
+            self.mode = "plain"
+        elif name == "aquarium":
+            self.mode = "aquarium"
+        else:
+            if self._scene is None or self._scene.name != name:
+                if self._scene is not None:
+                    self._scene.close()
+                self._scene = Scene(name)
+            self._scene.configure(name, display["options"])
+            self.mode = "native" if self._scene.ok else "plain"
+        if self.mode != "native" and self._scene is not None:
+            self._scene.close()
+            self._scene = None
         self._static = None
         self._update_timer()
         self.update()
 
+    def poke(self):
+        """Like a key press on the pad (the fox wakes up, a rocket flies by ...)."""
+        if self._scene is not None:
+            self._scene.poke()
+
+    def set_level(self, level):
+        if self._scene is not None:
+            self._scene.set_level(level)
+
     def _update_timer(self):
-        want = self.mode == "aquarium" and self.isVisible()
+        want = self.mode in ("aquarium", "native") and self.isVisible()
         if want and not self._timer.isActive():
             self._timer.start(int(1000 / FPS))
         elif not want and self._timer.isActive():
@@ -114,7 +151,7 @@ class Background(QWidget):
         pm = QPixmap(w, h)
         p = QPainter(pm)
         p.setRenderHint(QPainter.Antialiasing)
-        if self.mode == "plain":
+        if self.mode != "aquarium":
             g = QLinearGradient(0, 0, w * 0.4, h)
             g.setColorAt(0, QColor("#171927"))
             g.setColorAt(1, QColor("#0b0c13"))
@@ -162,6 +199,10 @@ class Background(QWidget):
     def _tick(self):
         dt = 1.0 / FPS
         self._t += dt
+        if self.mode == "native" and self._scene is not None:
+            self._scene.step(dt, self.colour)
+            self.update()
+            return
         w, h = self.width(), self.height()
         for f in self._fish:
             f.x += f.dir * f.speed * dt
@@ -181,6 +222,10 @@ class Background(QWidget):
 
     def paintEvent(self, _):
         p = QPainter(self)
+        if self.mode == "native" and self._scene is not None:
+            self._scene.paint(p, QRectF(self.rect()))
+            p.fillRect(self.rect(), QColor(6, 8, 16, 120))   # darker, so the text stays readable
+            return
         if self._static is None or self._static.size() != self.size():
             self._static = self._build_static()
         p.drawPixmap(0, 0, self._static)

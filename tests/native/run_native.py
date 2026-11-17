@@ -59,7 +59,7 @@ int main() {
     if (strcmp(line, "W") == 0) { printf("ACK %u %u\n", cfgAccepted, cfgRejected); cfgAccepted = cfgRejected = 0; continue; }
     if (applyConfigLine(line)) cfgAccepted++; else { cfgRejected++; printf("REJ %s\n", line); }
   }
-  printf("LANG %u BG %u FISH %d LEVEL %u MUSIC %d\n", padLang, bgAnim, showFish, screenLevel, showMusic);
+  printf("LANG %u BG %u FISH %d LEVEL %u MUSIC %d OPT %u\n", padLang, bgAnim, showFish, screenLevel, showMusic, bgOptions);
   printf("LIGHT %u %u %u MASK %u\n", lightMode, lightPct, lightColour, builtinMask);
   for (int i = 0; i < KEY_COUNT; i++) printf("KEY %d %u %u %u %s\n", i, actions[i].type, actions[i].code, actions[i].mods, actions[i].label);
   for (int i = 0; i < MAX_SCHEMES; i++) if (schemes[i].used) printf("SCHEME %d %u %s %02X%02X%02X %02X%02X%02X\n", i, schemes[i].effect, schemes[i].name,
@@ -103,7 +103,9 @@ s = config.defaults()
 s["pad_language"] = "de"
 s["keys"][0] = "sc:snip"; s["keys"][1] = "combo:15:F24"; s["keys"][2] = "none"; s["keys"][3] = "media:vol_up"
 s["keys"][13] = "key:A"; s["keys"][14] = "media:calculator"
-s["display"] = {"background": "plain", "fish": False, "brightness": 5, "music": False}
+s["display"]["animation"] = False
+s["display"]["options"]["aquarium"]["fish"] = False
+s["display"]["brightness"] = 5; s["display"]["music"] = False
 s["lights"]["schemes"] = [{"name": "Ocean|Blue", "effect": "glow", "colours": ["#00aaff"] * 14 + ["#ff0000"]},
                           {"name": "FireÜ", "effect": "breathe", "colours": ["#ff5500"] * 15}]
 s["lights"]["builtin_enabled"] = [False, True, True, False, True, True]
@@ -121,9 +123,28 @@ check("calculator 16-bit media code", "KEY 14 1 402 0 Rechner" in out, out)
 check("scheme 0 (| replaced, colours)", "SCHEME 0 2 Ocean/Blue 00AAFF FF0000" in out, out)
 check("scheme 1 with umlaut", "SCHEME 1 1 Fire\x9a FF5500 FF5500" in out, out)
 
+# 2b. the new backgrounds and their options
+for name, opts, want in (("fire", {"beat": True, "fox": True}, 3), ("fire", {"beat": False, "fox": True}, 2),
+                         ("seasons", {"season": "autumn"}, 8), ("matrix", {"key_names": False}, 0),
+                         ("lava", {"light_colour": True}, 1)):
+    s = config.defaults()
+    s["display"]["background"] = name
+    s["display"]["options"][name] = opts
+    lines = protocol.settings_lines(s)
+    out = run(exe, b"".join(lines) + protocol.SAVE)
+    check(f"background {name} {opts}", f"ACK {len(lines)} 0" in out and
+          f"BG {config.PAD_BACKGROUND[name]} FISH 1 LEVEL 16 MUSIC 1 OPT {want}" in out, out[:300])
+# an old pad (settings protocol 1) gets five fields and the aquarium instead
+s = config.defaults()
+s["display"]["background"] = "space"
+line = protocol.display_line(s["display"], proto=1)
+check("old pad gets 5 fields", line == b"D|0|1|16|1\n", line)
+out = run(exe, line + protocol.SAVE)
+check("5-field D still accepted", "ACK 1 0" in out and "BG 0 FISH 1" in out, out[:200])
+
 # 3. broken / hostile lines are rejected, nothing crashes
 bad = [b"K|15|0|1|0|x\n", b"K|0|9|1|0|x\n", b"K|0|0|300|0|x\n", b"K|0|0|1\n", b"K|-1|0|1|0|x\n",
-       b"G|2\n", b"D|0|1|0|1\n", b"D|5|1|5|1\n", b"LM|99\n", b"LB|5\n", b"LB|abc\n", b"LP|16\n",
+       b"G|2\n", b"D|0|1|0|1\n", b"D|9|1|5|1\n", b"D|2|1|5|1|256\n", b"D|2|1|5|1|3|9\n", b"D|2|1|5\n", b"LM|99\n", b"LB|5\n", b"LB|abc\n", b"LP|16\n",
        b"LS|10|0|x|" + b",".join([b"FFFFFF"] * 15) + b"\n", b"LS|0|0|x|FFFFFF\n",
        b"LS|0|0|x|" + b",".join([b"GGGGGG"] * 15) + b"\n", b"LS|0|0|x|" + b",".join([b"FFFFFF"] * 16) + b"\n",
        b"LM|8\n", b"X\n", b"K|0|0|1|0|" + b"A" * 200 + b"\n"]

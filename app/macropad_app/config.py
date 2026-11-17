@@ -19,7 +19,25 @@ log = logging.getLogger("macropad.config")
 
 LANGS = ("en", "de")
 EFFECTS = ("static", "breathe", "glow")       # own light schemes (FX_* in the firmware)
-BACKGROUNDS = ("aquarium", "plain")           # screen background (BG_* in the firmware)
+# Animated screen backgrounds, in catalog order. PAD_BACKGROUND = their number
+# on the pad (BG_* in the firmware); 1 there is "plain" = animation switched off.
+BACKGROUNDS = ("aquarium", "synthwave", "lava", "space", "fire", "matrix", "rain", "seasons")
+PAD_BACKGROUND = {"aquarium": 0, "synthwave": 2, "lava": 3, "space": 4, "fire": 5, "matrix": 6,
+                  "rain": 7, "seasons": 8}
+PAD_PLAIN = 1
+SEASONS = ("auto", "winter", "spring", "summer", "autumn")
+# The options of each background and their defaults (the same order as the
+# option bits on the pad, see protocol.background_options)
+BACKGROUND_OPTIONS = {
+    "aquarium": {"fish": True},
+    "synthwave": {"beat": True},
+    "lava": {"light_colour": False},
+    "space": {"rocket": True},
+    "fire": {"beat": True, "fox": True},
+    "matrix": {"key_names": True},
+    "rain": {"storm": True},
+    "seasons": {"season": "auto"},
+}
 KNOB_TARGETS = ("pc", "app")
 MAX_SCHEMES = 10
 BUILTIN_MODES = 6                             # Rainbow ... One colour (Off is mode 6)
@@ -45,8 +63,9 @@ DEFAULTS = {
         "schemes": [],             # [{"name": str, "effect": str, "colours": ["#rrggbb" x 15]}]
     },
     "display": {
+        "animation": True,         # animated background on/off (off = the plain screen)
         "background": "aquarium",
-        "fish": True,
+        "options": copy.deepcopy(BACKGROUND_OPTIONS),
         "brightness": 16,          # backlight level 1-16
         "music": True,             # show the music screen while a song plays
     },
@@ -134,8 +153,21 @@ def validate(raw) -> dict:
 
     di, dd = raw.get("display"), d["display"]
     if isinstance(di, dict):
-        dd["background"] = _pick(di.get("background"), BACKGROUNDS, dd["background"])
-        dd["fish"] = _bool(di.get("fish"), dd["fish"])
+        bg = di.get("background")
+        if "animation" not in di and bg == "plain":       # settings from 1.2 and older
+            dd["animation"] = False
+        dd["animation"] = _bool(di.get("animation"), dd["animation"])
+        dd["background"] = _pick(bg, BACKGROUNDS, dd["background"])
+        opts = di.get("options") if isinstance(di.get("options"), dict) else {}
+        if "fish" in di and "options" not in di:          # 1.2 and older: fish lived here
+            opts = {"aquarium": {"fish": di.get("fish")}}
+        for name, defaults_ in BACKGROUND_OPTIONS.items():
+            given = opts.get(name) if isinstance(opts.get(name), dict) else {}
+            for key, default in defaults_.items():
+                if key == "season":
+                    dd["options"][name][key] = _pick(given.get(key), SEASONS, default)
+                else:
+                    dd["options"][name][key] = _bool(given.get(key), default)
         dd["brightness"] = _int(di.get("brightness"), 1, 16, dd["brightness"])
         dd["music"] = _bool(di.get("music"), dd["music"])
 

@@ -86,6 +86,7 @@ class PadLink(QObject):
     now_playing = Signal(str, str, str)       # player, title, artist
     port_changed = Signal(str)
     music_state = Signal(bool, str)           # music info available?, reason if not
+    music_level = Signal(float)               # loudness 0-1, about 25 a second while music plays
 
     def __init__(self, knob_app_volume=True, player="auto"):
         super().__init__()
@@ -302,6 +303,8 @@ class PadLink(QObject):
                             if info:
                                 got_info = True
                                 self.info = info
+                                if info.protocol >= 2:   # the date, for the "Seasons" background
+                                    ser.write(protocol.month_line(time.localtime().tm_mon))
                                 self.info_received.emit(info)
                         elif msg.startswith("A|W|") and current is not None:
                             ack = protocol.parse_ack(msg)
@@ -374,6 +377,7 @@ class PadLink(QObject):
                 if music is not None and music.playing and now - last_level >= media.LEVEL_EVERY:
                     level = round(min(1.0, music.volume.peak() * media.LEVEL_GAIN) * 100)
                     ser.write(f"L|{level}\n".encode("ascii"))
+                    self.music_level.emit(level / 100.0)
                     last_level = now
                 await asyncio.sleep(0.02)
         finally:

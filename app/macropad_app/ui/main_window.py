@@ -109,8 +109,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(root)
         h.addWidget(self._build_sidebar())
         self.background = Background()
-        d = self.draft["display"]
-        self.background.set_style(d["background"], d["fish"])
+        self.background.set_style(self.draft["display"], self.draft["lights"]["colour"])
         h.addWidget(self.background, 1)
         content = QVBoxLayout(self.background)
         content.setContentsMargins(0, 18, 0, 18)
@@ -266,6 +265,7 @@ class MainWindow(QMainWindow):
         self.link.pad_lights_changed.connect(self._pad_lights)
         self.link.now_playing.connect(self._now_playing)
         self.link.music_state.connect(self._music_state)
+        self.link.music_level.connect(self._music_level)
         b = self.bridge
         b.update_checked.connect(self._update_checked)
         b.download_progress.connect(lambda f, s: self._progress and self._progress.set_progress(f, s))
@@ -288,6 +288,17 @@ class MainWindow(QMainWindow):
         self.status_box.set_status(status, T({"connected": "st_connected", "searching": "st_searching",
                                               "busy": "st_busy", "disconnected": "st_disconnected"}[status]))
 
+    def _music_level(self, level):
+        self.background.set_level(level)
+        page = self.pages.get("display")
+        if page is not None:
+            page.set_level(level)
+
+    def _pad_proto(self):
+        """Settings protocol of the connected pad (1 = firmware 2.0)."""
+        info = self.link.info
+        return info.protocol if info is not None else 1
+
     def _pad_info(self, info):
         self.pad_firmware = info.firmware if info else ""
         if info is not None:
@@ -296,10 +307,11 @@ class MainWindow(QMainWindow):
                 self.applying = True
                 self._show_status()
                 self.apply_btn.setText(T("applying"))
-                self.link.apply(protocol.settings_lines(self.settings.data))
+                self.link.apply(protocol.settings_lines(self.settings.data, self._pad_proto()))
             else:
                 self._adopt_pad_lights(info.mode, info.brightness, info.colour)
         self.pages["update"].refresh()
+        self.pages["display"].refresh()
         if self.firmware_outdated:
             self.menu_buttons["update"].setText("▸  " + T("menu_update").replace("&", "&&") + "  ●")
 
@@ -358,9 +370,7 @@ class MainWindow(QMainWindow):
         pending = self.settings.data["pad_sync_pending"]
         self.apply_btn.setEnabled((dirty or pending) and not self.applying and not self.flashing)
         self.unsaved.setText(T("unsaved_hint") if dirty else "")
-        d = self.draft["display"]
-        if (self.background.mode, self.background.fish_on) != (d["background"], d["fish"]):
-            self.background.set_style(d["background"], d["fish"])
+        self.background.set_style(self.draft["display"], self.draft["lights"]["colour"])
 
     def apply(self):
         new = config.validate(self.draft)
@@ -382,7 +392,7 @@ class MainWindow(QMainWindow):
             self.apply_btn.setEnabled(False)
             self.apply_dialog = dialogs.ApplyDialog(self, seconds=2)
             self.apply_dialog.open()
-            self.link.apply(protocol.settings_lines(self.settings.data))
+            self.link.apply(protocol.settings_lines(self.settings.data, self._pad_proto()))
         elif self.link_status == "connected" and self.pad_firmware == "":
             dialogs.info(self, T("apply_old_fw"))
         else:
