@@ -207,14 +207,14 @@ class UpdaterTests(unittest.TestCase):
             updater.download(self.release(), cancel=ev)
 
     def test_release_parsing(self):
-        manifest = {"version": "1.2.0", "firmware": "2.0.1",
+        manifest = {"version": "99.2.0", "firmware": "2.0.1",
                     "setup": {"name": "MacroPad-Setup-1.2.0.exe", "sha256": "AB" * 32, "size": 10},
                     "files": {"MacroPad.exe": "cd" * 32}}
         gh = {"body": "notes", "assets": [{"name": "manifest.json", "browser_download_url": "M"},
                                            {"name": "MacroPad-Setup-1.2.0.exe", "browser_download_url": "S", "size": 10}]}
         with mock.patch.object(updater, "_get_json", side_effect=lambda url, timeout=15: manifest if url == "M" else gh):
             rel = updater.latest_release("me/repo")
-        self.assertEqual((rel.version, rel.firmware, rel.setup_url, rel.setup_sha256), ("1.2.0", "2.0.1", "S", "ab" * 32))
+        self.assertEqual((rel.version, rel.firmware, rel.setup_url, rel.setup_sha256), ("99.2.0", "2.0.1", "S", "ab" * 32))
         self.assertTrue(rel.newer)
         with mock.patch.object(updater, "_get_json", return_value={"assets": []}):
             with self.assertRaises(updater.UpdateError):

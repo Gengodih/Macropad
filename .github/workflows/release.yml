@@ -1,12 +1,21 @@
-# Builds firmware + app + installer and publishes a GitHub release.
-# Start it on GitHub: Actions > Release > Run workflow (or push a tag v1.2.3).
-# The release is named after VERSION in app/macropad_app/__init__.py.
+# Builds firmware + app + installer.
+# Start it on GitHub: Actions > Release > Run workflow.
+#   - "Publish for everyone" off (default): test build only. The setup is at the
+#     bottom of the run page under "Artifacts"; nobody's app sees it as an update.
+#   - "Publish for everyone" on: a GitHub release named after VERSION in
+#     app/macropad_app/__init__.py - every installed app offers it as an update.
+# Pushing a tag v1.2.3 always publishes.
 name: Release
 
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish for everyone (off = test build only)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -86,7 +95,15 @@ jobs:
         run: |
           python tools/make_manifest.py release dist/MacroPad dist/MacroPad-Setup-${{ steps.v.outputs.app }}.exe dist/manifest.json
           cd app/macropad_app/resources/firmware && 7z a ../../../../dist/firmware-${{ steps.v.outputs.fw }}.zip *
+      - name: Test build (not published)
+        if: github.event_name == 'workflow_dispatch' && !inputs.publish
+        uses: actions/upload-artifact@v4
+        with:
+          name: Test-Setup-${{ steps.v.outputs.app }}
+          path: dist/MacroPad-Setup-${{ steps.v.outputs.app }}.exe
+          retention-days: 14
       - name: Publish release
+        if: github.event_name == 'push' || inputs.publish
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.v.outputs.app }}

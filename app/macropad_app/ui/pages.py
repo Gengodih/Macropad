@@ -599,6 +599,73 @@ class UpdatePage(Page):
 
 
 # ---------------------------------------------------------------------------
+class SettingsPage(Page):
+    def build(self):
+        gen = Card(T("set_general"))
+        r = QHBoxLayout()
+        self.minimized = ToggleSwitch()
+        self.minimized.toggled.connect(self._changed)
+        r.addWidget(self.minimized)
+        r.addWidget(label(T("set_minimized")), 1)
+        gen.layout_.addLayout(r)
+        r = QHBoxLayout()
+        r.addWidget(label(T("set_player"), wrap=False))
+        self.player = QComboBox()
+        for key, text in (("auto", T("player_auto")), ("spotify", "Spotify"), ("deezer", "Deezer")):
+            self.player.addItem(text, key)
+        self.player.setMinimumWidth(260)
+        self.player.currentIndexChanged.connect(self._changed)
+        r.addWidget(self.player)
+        r.addStretch()
+        gen.layout_.addLayout(r)
+        gen.add(label(T("set_player_note"), "Note"))
+        where = gen.add(label(T("set_data_where", path=str(paths.user_dir())), "Note"))
+        where.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.col.addWidget(gen)
+
+        reset = Card(T("set_reset_t"))
+        reset.add(label(T("set_reset_text"), "Hint"))
+        b = QPushButton(T("set_reset"))
+        b.clicked.connect(self._reset)
+        r = QHBoxLayout()
+        r.addWidget(b)
+        r.addStretch()
+        reset.layout_.addLayout(r)
+        self.col.addWidget(reset)
+
+        un = Card(T("set_uninst_t"))
+        un.add(label(T("set_uninst_text"), "Hint"))
+        self.delete_data = QCheckBox(T("set_uninst_data"))
+        un.add(self.delete_data)
+        b = QPushButton(T("set_uninst"))
+        b.setObjectName("Danger")
+        b.clicked.connect(lambda: self.ctx.uninstall(self.delete_data.isChecked()))
+        r = QHBoxLayout()
+        r.addWidget(b)
+        r.addStretch()
+        un.layout_.addLayout(r)
+        self.col.addWidget(un)
+
+    def refresh(self):
+        self.minimized.blockSignals(True)
+        self.player.blockSignals(True)
+        self.minimized.setChecked(self.draft["start_minimized"])
+        self.player.setCurrentIndex(max(0, self.player.findData(self.draft["player"])))
+        self.minimized.blockSignals(False)
+        self.player.blockSignals(False)
+
+    def _changed(self, *_):
+        self.draft["start_minimized"] = self.minimized.isChecked()
+        self.draft["player"] = self.player.currentData()
+        self.ctx.changed()
+
+    def _reset(self):
+        if dialogs.ask(self, T("set_reset_q")):
+            self.ctx.reset_settings()
+            dialogs.info(self, T("set_reset_done"))
+
+
+# ---------------------------------------------------------------------------
 class GuidePage(Page):
     def build(self):
         for key in ("switch", "cap", "tips"):

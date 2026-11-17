@@ -267,6 +267,46 @@ class WindowTests(unittest.TestCase):
         self.assertTrue(keys.is_valid(d.result_id))
         d.reject()
 
+    def test_settings_reset(self):
+        w = self.win
+        self.settings.data["app_language"] = "de"
+        self.settings.data["keys"][0] = "sc:copy"
+        w.draft = self.settings.copy()
+        w.reset_settings()
+        self.assertEqual(w.draft["keys"], keys.DEFAULT_LAYOUT)
+        self.assertEqual(w.draft["app_language"], "de")
+        self.assertTrue(w.apply_btn.isEnabled())
+        w.draft["start_minimized"] = True
+        w.changed()
+        w.apply()
+        self.assertTrue(config.Settings(self.settings.path).data["start_minimized"])
+
+    def test_uninstall(self):
+        from macropad_app import winsys
+        w = self.win
+        calls = []
+        with mock.patch.object(winsys, "find_uninstaller", return_value=None):
+            w.uninstall(True)                      # from source: only a message
+        with mock.patch.object(winsys, "find_uninstaller", return_value=Path("C:/x/unins000.exe")), \
+             mock.patch.object(winsys, "delete_user_data", lambda: calls.append("data")), \
+             mock.patch.object(winsys, "set_autostart", lambda on: calls.append(("auto", on))), \
+             mock.patch.object(winsys, "run_uninstaller", lambda p: calls.append(("run", p.name))), \
+             mock.patch.object(w, "quit_app", lambda: calls.append("quit")):
+            w.uninstall(True)
+        self.assertEqual(calls, [("auto", False), "data", ("run", "unins000.exe"), "quit"])
+
+    def test_delete_user_data(self):
+        from macropad_app import paths, winsys
+        import logging
+        home = Path(tempfile.mkdtemp())
+        with mock.patch.dict(os.environ, {"MACROPAD_HOME": str(home)}):
+            (paths.user_dir() / "settings.json").write_text("{}")
+            h = logging.FileHandler(paths.user_dir() / "macropad.log")
+            logging.getLogger().addHandler(h)
+            winsys.delete_user_data()
+            self.assertFalse(home.exists())
+            self.assertNotIn(h, logging.getLogger().handlers)
+
     def test_language_switch_rebuilds(self):
         w = self.win
         w.draft["app_language"] = "de"

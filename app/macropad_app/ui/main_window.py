@@ -16,13 +16,13 @@ from ..device import PadLink
 from ..i18n import T, set_language
 from . import dialogs, theme
 from .background import Background
-from .pages import DisplayPage, GuidePage, HomePage, KeysPage, LanguagePage, LedsPage, UpdatePage
+from .pages import DisplayPage, GuidePage, HomePage, KeysPage, LanguagePage, LedsPage, SettingsPage, UpdatePage
 from .widgets import StatusBox, ToggleSwitch, label
 
 log = logging.getLogger("macropad.ui")
 
 MENU = [("home", HomePage), ("keys", KeysPage), ("leds", LedsPage), ("language", LanguagePage),
-        ("update", UpdatePage), ("guide", GuidePage), ("display", DisplayPage)]
+        ("update", UpdatePage), ("guide", GuidePage), ("display", DisplayPage), ("settings", SettingsPage)]
 
 
 def app_icon() -> QIcon:
@@ -152,7 +152,8 @@ class MainWindow(QMainWindow):
         group = QButtonGroup(self)
         group.setExclusive(True)
         for key, _ in MENU:
-            b = QPushButton(("▸  " if key != "home" else "⌂  ") + T(f"menu_{key}").replace("&", "&&"))
+            icon = {"home": "\u2302  ", "settings": "\u2699  "}.get(key, "\u25B8  ")
+            b = QPushButton(icon + T(f"menu_{key}").replace("&", "&&"))
             b.setObjectName("MenuItem")
             b.setCheckable(True)
             b.setCursor(Qt.PointingHandCursor)
@@ -348,7 +349,7 @@ class MainWindow(QMainWindow):
     def _user_part(data):
         """The settings the user edits on the pages (not the app's own bookkeeping)."""
         d = config.validate(data)
-        for k in ("pad_sync_pending", "updates", "autostart", "start_minimized"):
+        for k in ("pad_sync_pending", "updates", "autostart"):
             d.pop(k, None)
         return d
 
@@ -550,6 +551,39 @@ class MainWindow(QMainWindow):
         if self._progress is not None:
             self._progress.finish(text)
         self.pages["update"].refresh()
+
+    # ----- settings page ----------------------------------------------------------
+    def reset_settings(self):
+        """Everything back to the defaults (in the draft: Apply keeps it). The app
+        languages, autostart and update settings stay as they are."""
+        fresh = config.defaults()
+        for keep in ("app_language", "pad_language", "autostart", "updates", "pad_sync_pending"):
+            fresh[keep] = copy.deepcopy(self.settings.data[keep])
+        self.draft = fresh
+        for page in self.pages.values():
+            page.refresh()
+        self.changed()
+
+    def uninstall(self, delete_data):
+        if self.flashing:
+            return
+        unins = winsys.find_uninstaller()
+        if unins is None:
+            dialogs.info(self, T("set_uninst_missing"))
+            return
+        if not dialogs.ask(self, T("set_uninst_q_data" if delete_data else "set_uninst_q")):
+            return
+        self.link.stop()
+        winsys.set_autostart(False)
+        if delete_data:
+            winsys.delete_user_data()
+        try:
+            winsys.run_uninstaller(unins)
+        except OSError as e:
+            dialogs.info(self, T("set_uninst_failed", e=e))
+            self.link.start()
+            return
+        self.quit_app()
 
     # ----- repair ---------------------------------------------------------------
     def check_files(self):

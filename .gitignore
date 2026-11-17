@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.venv/
+build/
+dist/
+firmware/.pio/
+app/macropad_app/_build_info.py
+*.log

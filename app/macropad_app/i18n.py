@@ -12,6 +12,7 @@ TEXTS = {
     "menu_update": ("Update & Repair", "Update & Repair"),
     "menu_guide": ("Guide", "Anleitung"),
     "menu_display": ("Display", "Display"),
+    "menu_settings": ("Settings", "Einstellungen"),
     "pad_status": ("Macro Pad status:", "Macro Pad Status:"),
     "st_connected": ("Connected", "Verbunden"),
     "st_searching": ("Searching", "Suche..."),
@@ -256,6 +257,39 @@ TEXTS = {
         "• Log-Datei für Hilfeanfragen: {log}"),
     "guide_credit_t": ("Design", "Design"),
     "guide_credit": ("Macro Pad design by {maker}.", "Macro-Pad-Design von {maker}."),
+
+    # --- settings ---
+    "set_title": ("Settings", "Einstellungen"),
+    "set_general": ("General", "Allgemein"),
+    "set_minimized": ("Start in the background (only the tray icon)", "Im Hintergrund starten (nur Tray-Symbol)"),
+    "set_player": ("Music app", "Musik-App"),
+    "player_auto": ("Automatic (Spotify or Deezer)", "Automatisch (Spotify oder Deezer)"),
+    "set_player_note": ("A different music app takes effect after the next start of the app.",
+                        "Eine andere Musik-App gilt ab dem n\u00e4chsten Start der App."),
+    "set_reset_t": ("Reset", "Zur\u00fccksetzen"),
+    "set_reset_text": ("Puts keys, lights, display and the other settings back to the defaults. "
+                       "Press Apply afterwards to send them to the pad too.",
+                       "Setzt Tasten, Licht, Display und die anderen Einstellungen auf Standard zur\u00fcck. "
+                       "Danach Anwenden dr\u00fccken, damit das Pad sie auch bekommt."),
+    "set_reset": ("Reset all settings", "Alle Einstellungen zur\u00fccksetzen"),
+    "set_reset_q": ("Reset all settings to the defaults?", "Alle Einstellungen auf Standard zur\u00fccksetzen?"),
+    "set_reset_done": ("Done. Press Apply to keep it and send it to the pad.",
+                       "Erledigt. Dr\u00fccke Anwenden, um es zu speichern und ans Pad zu senden."),
+    "set_uninst_t": ("Uninstall", "Deinstallieren"),
+    "set_uninst_text": ("Removes the app from this PC. The macro pad keeps its settings and keeps working "
+                        "(without music info).",
+                        "Entfernt die App von diesem PC. Das Macro Pad beh\u00e4lt seine Einstellungen und "
+                        "funktioniert weiter (ohne Musik-Infos)."),
+    "set_uninst_data": ("Also delete my settings and data (log, downloads)",
+                        "Meine Einstellungen und Daten (Log, Downloads) auch l\u00f6schen"),
+    "set_uninst": ("Uninstall app", "App deinstallieren"),
+    "set_uninst_q": ("Remove the Macro Pad app from this PC now?", "Die Macro-Pad-App jetzt von diesem PC entfernen?"),
+    "set_uninst_q_data": ("Remove the Macro Pad app and all your settings from this PC now?",
+                          "Die Macro-Pad-App und alle deine Einstellungen jetzt von diesem PC entfernen?"),
+    "set_uninst_missing": ("Uninstalling only works in the installed app (not when it runs from the source code).",
+                           "Deinstallieren geht nur in der installierten App (nicht beim Start aus dem Quellcode)."),
+    "set_uninst_failed": ("Could not start the uninstaller: {e}", "Konnte die Deinstallation nicht starten: {e}"),
+    "set_data_where": ("Your settings are stored in: {path}", "Deine Einstellungen liegen in: {path}"),
 
     # --- errors ---
     "err_title": ("Something went wrong", "Etwas ist schiefgelaufen"),
