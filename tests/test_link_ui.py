@@ -401,13 +401,15 @@ class ActionTests(unittest.TestCase):
         self.wait(300)
         self.assertEqual(self.link.sent, [self.code("sc:copy"), self.code("key:A")])
 
+    @mock.patch("macropad_app.actions.DOUBLE_MS", 700)
+    @mock.patch("macropad_app.actions.HOLD_MS", 500)
     def test_tap_hold_double(self):
         r = self.runner
         r.key_event(1, True, False, True); r.key_event(1, False, False, True)   # tap ...
-        self.wait(400)                                                       # ... no second tap
+        self.wait(1100)                                                      # ... no second tap
         self.assertEqual(self.link.sent, [self.code("key:B")])
         self.link.sent.clear()
-        r.key_event(1, True, False, True); self.wait(550)                    # hold
+        r.key_event(1, True, False, True); self.wait(900)                    # hold
         self.assertEqual(self.link.sent, [self.code("key:C")])
         r.key_event(1, False, False, True)
         self.assertEqual(self.link.sent, [self.code("key:C")])               # letting go adds nothing
@@ -415,7 +417,7 @@ class ActionTests(unittest.TestCase):
         r.key_event(1, True, False, True); r.key_event(1, False, False, True)
         self.wait(80)
         r.key_event(1, True, False, True); r.key_event(1, False, False, True)  # double tap
-        self.wait(400)
+        self.wait(1100)
         self.assertEqual(self.link.sent, [self.code("key:D")])
 
     def test_tap_without_double_is_instant(self):
@@ -493,7 +495,7 @@ class WidgetTests(unittest.TestCase):
         t.skip()                                     # paused + skip = stop
         self.assertEqual(t.phase, focus.OFF)
 
-    def test_picture_convert_and_upload(self):
+    def test_picture_convert(self):
         from PIL import Image
         from macropad_app import picture
         d = Path(tempfile.mkdtemp())
@@ -506,6 +508,15 @@ class WidgetTests(unittest.TestCase):
         self.assertEqual(fitted.data[:2], b"\x00\x00")          # black edge above the picture
         with self.assertRaises(ValueError):
             picture.convert(d / "missing.png")
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "needs a pseudo terminal")
+    def test_picture_upload(self):
+        from PIL import Image
+        from macropad_app import picture
+        d = Path(tempfile.mkdtemp())
+        still = d / "a.png"
+        Image.new("RGB", (640, 200), (255, 0, 0)).save(still)
+        pic = picture.convert(still)
         pad = FakePad()
         pad.proto = 4
         link = device.PadLink()
