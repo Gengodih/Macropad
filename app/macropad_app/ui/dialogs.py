@@ -95,7 +95,7 @@ class ComboRecorder(QLineEdit):
 class ActionPicker(QDialog):
     """Choose what one key does: categories on the left, actions on the right.
 
-    mode: "key" (normal key), "layer2" (no layer / light keys), "sub" (part of a
+    mode: "key" (normal key), "sub" (part of a
     tap/hold key: pad keys, macros, microphone), "keys_only" (a macro step).
     draft: the settings being edited (new macros / tap-hold keys are added to it)."""
 
@@ -126,8 +126,6 @@ class ActionPicker(QDialog):
         if mode != "keys_only":
             groups.append(("special", [(a, keys.label(a, lang)) for a in special]))
             more = []
-            if mode == "key":
-                more.append(("layer", keys.label("layer", lang)))
             more.append(("app:mic_mute", keys.label("app:mic_mute", lang)))
             if draft:
                 for rid, m in draft["macros"].items():
@@ -259,7 +257,7 @@ class ActionPicker(QDialog):
 
     def _describe(self, aid):
         kind = str(aid).partition(":")[0]
-        if kind in ("none", "lights", "fun2", "layer"):
+        if kind in ("none", "lights", "fun2"):
             self.desc.setText(T(f"desc_{kind}"))
         elif kind in ("app", "macro", "multi") or str(aid).startswith("+"):
             key = {"app": "desc_mic", "macro": "desc_macro", "multi": "desc_multi"}.get(kind)

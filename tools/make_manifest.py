@@ -35,7 +35,13 @@ def release_manifest(dist, setup, out):
     data = json.loads((Path(dist) / "manifest.json").read_text("utf-8"))
     setup = Path(setup)
     data["setup"] = {"name": setup.name, "size": setup.stat().st_size, "sha256": sha(setup)}
-    Path(out).write_text(json.dumps(data, indent=1), "utf-8")
+    # what this version brings (shown by the installed apps before they update)
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
+    from macropad_app import changelog
+    data["notes"] = changelog.as_dict(data["version"])
+    Path(out).write_text(json.dumps(data, indent=1, ensure_ascii=False), "utf-8")
+    lines = [f"- {n}" for n in data["notes"]["en"]] + [""] + [f"- {n}" for n in data["notes"]["de"]]
+    (Path(out).parent / "release-notes.md").write_text("\n".join(lines) + "\n", "utf-8")
     print("release manifest:", data["setup"])
 
 

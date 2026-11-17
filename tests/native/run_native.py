@@ -153,19 +153,18 @@ check("old pad gets 5 fields", line == b"D|0|1|16|1\n", line)
 out = run(exe, line + protocol.SAVE)
 check("5-field D still accepted", "ACK 1 0" in out and "BG 0 FISH 1" in out, out[:200])
 
-# 2c. app keys, layer 2, welcome name, sleep timer
+# 2c. app keys, welcome name, sleep timer
 s = config.defaults()
 s["macros"] = {"m1": {"name": "Mail", "steps": [{"type": "text", "text": "hi"}]}}
 s["multi"] = {"t1": {"name": "CopyPaste", "tap": "sc:copy", "hold": "sc:paste", "double": "none"}}
 s["keys"][0] = "macro:m1"; s["keys"][1] = "multi:t1"; s["keys"][2] = "layer"; s["keys"][3] = "app:mic_mute"
-s["keys2"][5] = "key:A"; s["keys2"][6] = "macro:m1"
 s["owner_name"] = "Jörg"; s["sleep"]["idle_minutes"] = 15
 lines = protocol.settings_lines(s)
 out = run(exe, b"".join(lines) + protocol.SAVE)
-check("app keys + layer 2 accepted", f"ACK {len(lines)} 0" in out, out[:400])
+check("app keys accepted", f"ACK {len(lines)} 0" in out, out[:400])
 check("macro key = app type", "KEY 0 5 0 0 Mail" in out and "KEY 1 5 0 0 CopyPaste" in out, out)
-check("layer key", "KEY 2 6 0 0 " in out and "KEY 3 5 0 0 " in out, out)
-check("layer 2 keys", "KEY2 5 0 4 0 A" in out and "KEY2 6 5 0 0 Mail" in out and "KEY2 0 4 0 0 " in out, out)
+check("no layer key any more: back to the default", "KEY 2 0 106 0 F15" in out and "KEY 3 5 0 0 " in out, out)
+check("no layer-2 lines", not any(l.startswith(b"K2|") for l in lines), lines[:3])
 check("owner + idle", "OWNER J\x94rg IDLE 15" in out, out)
 old = protocol.settings_lines(s, proto=2)
 check("old pad: app keys become defaults", b"K|0|0|104|0|F13\n" in old and not any(l.startswith(b"K2|") for l in old), old[:3])

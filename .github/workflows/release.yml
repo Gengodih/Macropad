@@ -126,6 +126,7 @@ jobs:
           tag_name: v${{ steps.v.outputs.app }}
           name: Macro Pad ${{ steps.v.outputs.app }}
           make_latest: true
+          body_path: dist/release-notes.md
           files: |
             dist/MacroPad-Setup-${{ steps.v.outputs.app }}.exe
             dist/manifest.json

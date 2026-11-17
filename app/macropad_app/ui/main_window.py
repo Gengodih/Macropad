@@ -335,7 +335,7 @@ class MainWindow(QMainWindow):
     # ----- keys, profiles, microphone, lock --------------------------------------
     def _key_event(self, key, down, layer2, app):
         if down:
-            self.stats.count(key, layer2)
+            self.stats.count(key)
             self.background.poke()                    # the app's background reacts too
         self.runner.key_event(key, down, layer2, app)
 

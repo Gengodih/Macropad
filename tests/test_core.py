@@ -238,12 +238,31 @@ class UpdaterTests(unittest.TestCase):
         with mock.patch.object(updater, "_get_json", side_effect=lambda url, timeout=15: manifest if url == "M" else gh):
             rel = updater.latest_release("me/repo")
         self.assertEqual((rel.version, rel.firmware, rel.setup_url, rel.setup_sha256), ("99.2.0", "2.0.1", "S", "ab" * 32))
+        self.assertEqual(rel.notes_by_lang, {})
+        manifest["notes"] = {"en": ["New thing"], "de": ["Neues Ding"], "xx": ["ignored"]}
+        with mock.patch.object(updater, "_get_json", side_effect=lambda url, timeout=15: manifest if url == "M" else gh):
+            rel = updater.latest_release("me/repo")
+        self.assertEqual(rel.notes_by_lang, {"en": ["New thing"], "de": ["Neues Ding"]})
         self.assertTrue(rel.newer)
         with mock.patch.object(updater, "_get_json", return_value={"assets": []}):
             with self.assertRaises(updater.UpdateError):
                 updater.latest_release("me/repo")
         with self.assertRaises(updater.UpdateError):
             updater.latest_release("")
+
+    def test_release_manifest_has_notes(self):
+        import json
+        import subprocess
+        d = Path(tempfile.mkdtemp())
+        (d / "dist").mkdir()
+        (d / "dist" / "manifest.json").write_text(json.dumps({"version": "1.6.0", "firmware": "2.3.0", "files": {}}))
+        (d / "setup.exe").write_bytes(b"x")
+        root = Path(__file__).resolve().parents[1]
+        subprocess.run([sys.executable, str(root / "tools" / "make_manifest.py"), "release", str(d / "dist"),
+                        str(d / "setup.exe"), str(d / "out.json")], check=True, capture_output=True)
+        data = json.loads((d / "out.json").read_text("utf-8"))
+        self.assertTrue(data["notes"]["en"] and data["notes"]["de"])
+        self.assertIn("- ", (d / "release-notes.md").read_text("utf-8"))
 
     def test_check_files(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -374,3 +393,54 @@ class RendererTests(unittest.TestCase):
             r.frame()
         r.close()
         r.close()
+
+
+class HeardVolumeTests(unittest.TestCase):
+    """Music app mode: the pad shows Windows volume x the app's mixer level."""
+
+    def setUp(self):
+        from macropad_app import media
+
+        class App:
+            exe = "spotify.exe"
+
+            def __init__(self):
+                self.lv, self.muted = 1.0, False
+
+            def level(self):
+                return self.lv
+
+            def get(self):
+                return round(self.lv * 100), self.muted
+
+            def set_level(self, level, unmute=False):
+                self.lv = level
+
+            def change(self, clicks):
+                self.lv = min(1.0, max(0.0, self.lv + clicks * media.VOL_STEP))
+
+        class Master:
+            def __init__(self):
+                self.m = 0.4
+
+            def scalar(self):
+                return self.m
+
+            def get(self):
+                return round(self.m * 100), False
+        self.app, self.master = App(), Master()
+        self.v = media.HeardVolume(self.app, self.master)
+
+    def test_shows_what_you_hear(self):
+        self.assertEqual(self.v.get(), (40, False))         # Windows 40 %, Spotify slider 100 %
+        self.v.change(-5)                                   # knob: 5 clicks down = 10 % less heard
+        self.assertEqual(self.v.get(), (30, False))
+        self.assertAlmostEqual(self.app.lv, 0.75)
+        self.v.change(50)                                   # never louder than the Windows volume
+        self.assertEqual(self.v.get(), (40, False))
+        self.assertAlmostEqual(self.app.lv, 1.0)
+        self.master.m = 0.0                                 # Windows at 0: plain steps on the app
+        self.v.change(-1)
+        self.assertAlmostEqual(self.app.lv, 0.98)
+        self.app.level = lambda: None                       # app not playing yet
+        self.assertEqual(self.v.get(), (-1, False))

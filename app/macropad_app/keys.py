@@ -122,7 +122,6 @@ SPECIAL = {
     "none": ("Nothing", "Nichts"),
     "lights": ("Light key", "Licht-Taste"),
     "fun2": ("Fun 2 (colour key)", "Fun 2 (Farb-Taste)"),
-    "layer": ("Layer 2 (hold)", "Ebene 2 (halten)"),
 }
 # Done by the app ("app:<name>")
 APP_ACTIONS = {
@@ -247,8 +246,6 @@ def resolve(action_id: str, lang: str = "en", names: dict | None = None) -> PadA
         raise TypeError("action id must be text")
     kind, _, rest = action_id.partition(":")
     text = label(action_id, lang, names)
-    if kind == "layer" and not rest:
-        return PadAction(T_LAYER, 0, 0, text)
     if kind == "app" or kind in REF_KINDS:
         return PadAction(T_APP, 0, 0, text)
     if kind == "none" and not rest:
@@ -275,8 +272,6 @@ def short_label(action_id: str, lang: str = "en", names: dict | None = None) -> 
     kind, _, rest = str(action_id).partition(":")
     if kind == "none":
         return "—"
-    if kind == "layer":
-        return "⇧ 2"
     if kind == "app" and rest == "mic_mute":
         return "\U0001F3A4"
     if kind == "app" and rest == "timer":

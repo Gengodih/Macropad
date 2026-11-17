@@ -17,10 +17,8 @@ HOLD_MS = 400        # held this long = "hold"
 DOUBLE_MS = 260      # a second tap within this time = "double tap"
 
 
-def action_for(settings, profile, key, layer2):
-    """The action id of a key right now (layer 2 / the active profile / normal)."""
-    if layer2:
-        return settings["keys2"][key]
+def action_for(settings, profile, key, layer2=False):
+    """The action id of a key right now (the active profile or the normal layout)."""
     if profile is not None and 0 <= profile < len(settings["profiles"]):
         return settings["profiles"][profile]["keys"][key]
     return settings["keys"][key]

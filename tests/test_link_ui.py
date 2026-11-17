@@ -354,7 +354,7 @@ if __name__ == "__main__":
 
 
 class ActionTests(unittest.TestCase):
-    """Macros, tap / hold / double tap, layer 2 and profiles, with a fake link."""
+    """Macros, tap / hold / double tap and profiles, with a fake link."""
 
     @classmethod
     def setUpClass(cls):
@@ -381,7 +381,6 @@ class ActionTests(unittest.TestCase):
             "multi": {"t1": {"name": "T", "tap": "key:B", "hold": "key:C", "double": "key:D"},
                       "t2": {"name": "T2", "tap": "key:E", "hold": "none", "double": "none"}},
             "keys": ["macro:m1", "multi:t1", "multi:t2", "app:mic_mute"] + ["none"] * 11,
-            "keys2": ["key:F"] + ["none"] * 14,
             "profiles": [{"name": "P", "programs": ["game.exe"], "keys": ["key:G"] + ["none"] * 14}]})
         self.profile = None
         self.runner = ActionRunner(self.link, lambda: (self.s, self.profile))
@@ -425,11 +424,12 @@ class ActionTests(unittest.TestCase):
         self.runner.key_event(2, False, False, True)
         self.assertEqual(self.link.sent, [self.code("key:E")])
 
-    def test_mic_layer2_profile_and_pad_keys(self):
+    def test_mic_profile_and_pad_keys(self):
         self.runner.key_event(3, True, False, True)
         self.assertEqual(self.link.mic, 1)
-        self.runner.key_event(0, True, True, True)          # layer 2: key:F (a pad key reported as app key)
-        self.assertEqual(self.link.sent[-1], self.code("key:F"))
+        self.runner.key_event(0, True, True, True)          # an old pad's layer-2 report: the normal key (macro)
+        self.wait(300)
+        self.assertEqual(self.link.sent[:2], [self.code("sc:copy"), self.code("key:A")])
         self.profile = 0
         self.runner.key_event(0, True, False, True)
         self.assertEqual(self.link.sent[-1], self.code("key:G"))

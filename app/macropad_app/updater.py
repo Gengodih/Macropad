@@ -42,6 +42,7 @@ class Cancelled(Exception):
 class Release:
     version: str
     notes: str = ""
+    notes_by_lang: dict = field(default_factory=dict)   # {"en": [...], "de": [...]} from the manifest
     setup_name: str = ""
     setup_url: str = ""
     setup_size: int = 0
@@ -94,6 +95,8 @@ def _release_from(data) -> Release:
     return Release(
         version=str(manifest["version"]),
         notes=str(data.get("body") or "")[:4000],
+        notes_by_lang={k: [str(x)[:200] for x in v[:20]] for k, v in (manifest.get("notes") or {}).items()
+                       if k in ("en", "de") and isinstance(v, list)} if isinstance(manifest.get("notes"), dict) else {},
         setup_name=str(setup.get("name", "")),
         setup_url=setup_asset["browser_download_url"] if setup_asset else "",
         setup_size=int(setup.get("size") or (setup_asset or {}).get("size") or 0),

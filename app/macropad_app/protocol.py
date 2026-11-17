@@ -58,7 +58,7 @@ def _pad_action(index, action_id, lang, names, proto):
 
 def key_line(index: int, action_id: str, lang: str, names: dict | None = None, proto: int = 3,
              kind: str = "K") -> bytes:
-    """K = layer 1 (saved), K2 = layer 2 (saved), O = profile of the program in front (not saved)."""
+    """K = the keys (saved), O = profile of the program in front (not saved)."""
     a = _pad_action(index, action_id, lang, names, proto)
     return _line(kind, index, a.type, a.code, a.mods, pad_text(a.label, 23))
 
@@ -198,7 +198,6 @@ def settings_lines(settings: dict, proto: int = 3) -> list[bytes]:
     lines = [language_line(lang)]
     lines += [key_line(i, a, lang, names, proto) for i, a in enumerate(settings["keys"])]
     if proto >= 3:
-        lines += [key_line(i, a, lang, names, proto, kind="K2") for i, a in enumerate(settings["keys2"])]
         lines.append(_line("N", pad_text(settings["owner_name"], 20)))
         lines.append(_line("TO", settings["sleep"]["idle_minutes"]))
     lines.append(display_line(settings["display"], proto))

@@ -4,9 +4,9 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QButtonGroup, QColorDialog, QComboBox, QFileDialog, QGridLayout, QHBoxLayout,
                                QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton, QRadioButton, QScrollArea,
-                               QSizePolicy, QSlider, QSpinBox, QVBoxLayout, QWidget, QCheckBox)
+                               QSizePolicy, QSlider, QSpinBox, QTextBrowser, QVBoxLayout, QWidget, QCheckBox)
 
-from .. import MAKER, VERSION, config, keys, paths
+from .. import MAKER, VERSION, config, keys, paths, protocol
 from ..i18n import T, language
 from . import dialogs, theme
 from .scenes import OptionsPanel, PreviewTile
@@ -89,10 +89,10 @@ def _esc(text):
 
 # ---------------------------------------------------------------------------
 class KeysPage(Page):
-    """Keys of the normal layout, of layer 2, or of a profile (for some programs)."""
+    """Keys of the normal layout, or of a profile (for some programs)."""
 
     def build(self):
-        self.view = "base"          # "base", "layer2" or a profile index (int)
+        self.view = "base"          # "base" or a profile index (int)
         card = Card(T("keys_title"))
         card.add(label(T("keys_hint"), "Hint"))
         # profile row
@@ -113,22 +113,6 @@ class KeysPage(Page):
         row.addStretch()
         card.layout_.addLayout(row)
         self.profile_info = card.add(label("", "Note"))
-        # layer row (normal layout only)
-        self.layer_row = QWidget()
-        lr = QHBoxLayout(self.layer_row)
-        lr.setContentsMargins(0, 0, 0, 0)
-        self.layer1 = QRadioButton(T("layer_1"))
-        self.layer2 = QRadioButton(T("layer_2"))
-        group = QButtonGroup(self)
-        group.addButton(self.layer1)
-        group.addButton(self.layer2)
-        self.layer2.toggled.connect(self._layer_chosen)
-        lr.addWidget(self.layer1)
-        lr.addWidget(self.layer2)
-        lr.addStretch()
-        card.add(self.layer_row)
-        self.layer_note = card.add(label("", "Note"))
-
         grid = QGridLayout()
         grid.setSpacing(10)
         self.caps = []
@@ -196,23 +180,16 @@ class KeysPage(Page):
 
     # ----- which layout is shown -----------------------------------------------
     def _layout(self):
-        if self.view == "layer2":
-            return self.draft["keys2"]
         if isinstance(self.view, int):
             return self.draft["profiles"][self.view]["keys"]
         return self.draft["keys"]
 
     def _profile_chosen(self, index):
         if index <= 0:
-            self.view = "layer2" if self.layer2.isChecked() else "base"
+            self.view = "base"
         else:
             self.view = index - 1
         self.refresh()
-
-    def _layer_chosen(self):
-        if not isinstance(self.view, int):
-            self.view = "layer2" if self.layer2.isChecked() else "base"
-            self.refresh()
 
     def refresh(self):
         lang = language()
@@ -239,16 +216,6 @@ class KeysPage(Page):
         else:
             now = d["profiles"][active]["name"] if active is not None and active < len(d["profiles"]) else None
             self.profile_info.setText(T("profile_active", name=now) if now else T("profile_none_active"))
-        self.layer_row.setVisible(not is_profile)
-        for b in (self.layer1, self.layer2):
-            b.blockSignals(True)
-        self.layer2.setChecked(self.view == "layer2")
-        self.layer1.setChecked(self.view != "layer2")
-        for b in (self.layer1, self.layer2):
-            b.blockSignals(False)
-        has_layer_key = "layer" in d["keys"]
-        self.layer_note.setVisible(not is_profile)
-        self.layer_note.setText(T("layer_note") if has_layer_key else T("layer_need_key"))
         # keys
         layout = self._layout()
         notes = []
@@ -288,11 +255,8 @@ class KeysPage(Page):
 
     def pick(self, i):
         layout = self._layout()
-        mode = "layer2" if self.view == "layer2" else "key"
-        d = dialogs.ActionPicker(self, i, layout[i], draft=self.draft, mode=mode)
+        d = dialogs.ActionPicker(self, i, layout[i], draft=self.draft, mode="key")
         if d.exec() and config.action_ok(self.draft, d.result_id):
-            if mode == "layer2" and d.result_id in ("layer", "lights", "fun2"):
-                return
             layout[i] = d.result_id
             self.ctx.changed()
             self.refresh()
@@ -301,9 +265,7 @@ class KeysPage(Page):
         if not dialogs.ask(self, T("keys_reset_q")):
             return
         layout = self._layout()
-        if self.view == "layer2":
-            fresh = ["none"] * keys.KEY_COUNT
-        elif isinstance(self.view, int):
+        if isinstance(self.view, int):
             fresh = list(self.draft["keys"])
         else:
             fresh = list(keys.DEFAULT_LAYOUT)
@@ -1020,6 +982,13 @@ class UpdatePage(Page):
         r.addWidget(self.auto)
         r.addWidget(label(T("upd_auto"), wrap=False))
         app.layout_.addLayout(r)
+        app.add(label(T("whats_new"), wrap=False))
+        self.notes = QTextBrowser()
+        self.notes.setOpenLinks(False)
+        self.notes.setFixedHeight(130)
+        self.notes.setStyleSheet("QTextBrowser { background: rgba(0, 0, 0, 0.28); border: 1px solid #34344a; "
+                                 "border-radius: 10px; padding: 6px 8px; color: #dcdce6; }")
+        app.add(self.notes)
         self.col.addWidget(app)
 
         fw = Card(T("upd_fw"))
@@ -1049,6 +1018,31 @@ class UpdatePage(Page):
         rep.add(label(T("repair_pad"), "Note"))
         self.col.addWidget(rep)
 
+    def _notes_html(self):
+        """Short list of changes: the available update first, then the installed version and older ones."""
+        import html
+        from .. import changelog
+        lang = language()
+        parts = []
+
+        def block(version, items, tag):
+            if not items:
+                return
+            rows = "".join(f"<li>{html.escape(i)}</li>" for i in items)
+            parts.append(f"<p style='margin:2px 0'><b>{html.escape(version)}</b> "
+                         f"<span style='color:#9a9ab0'>{tag}</span></p>"
+                         f"<ul style='margin-top:0; margin-bottom:6px; -qt-list-indent:1'>{rows}</ul>")
+
+        latest = self.ctx.latest
+        if latest and latest.newer:
+            items = latest.notes_by_lang.get(lang) or latest.notes_by_lang.get("en") or [
+                ln.strip("-* ").strip() for ln in latest.notes.splitlines() if ln.strip()][:8]
+            block(latest.version, items, T("notes_available"))
+        for v in changelog.CHANGES:
+            if protocol.version_tuple(v) <= protocol.version_tuple(VERSION):
+                block(v, changelog.notes(v, lang), T("notes_installed") if v == VERSION else "")
+        return "".join(parts) or T("notes_none")
+
     def refresh(self):
         c = self.ctx
         self.auto.blockSignals(True)
@@ -1056,6 +1050,7 @@ class UpdatePage(Page):
         self.auto.blockSignals(False)
         self.app_state.setText(c.update_text)
         self.update_btn.setVisible(bool(c.latest and c.latest.newer))
+        self.notes.setHtml(self._notes_html())
         self.check_btn.setEnabled(not c.update_busy)
         # firmware
         if c.link_status == "connected":
@@ -1182,7 +1177,7 @@ class SettingsPage(Page):
         self.draft["sleep"]["idle_minutes"] = self.idle.currentData()
         self.ctx.changed()
 
-    BACKUP_PARTS = ("keys", "keys2", "macros", "multi", "profiles", "lights", "display", "knob_target",
+    BACKUP_PARTS = ("keys", "macros", "multi", "profiles", "lights", "display", "knob_target",
                     "pad_language", "owner_name", "sleep")
 
     def _export(self):
@@ -1241,10 +1236,6 @@ class StatsPage(Page):
         self.range_box.setCurrentIndex(1)
         self.range_box.currentIndexChanged.connect(self.refresh)
         r.addWidget(self.range_box)
-        self.layer_box = QComboBox()
-        self.layer_box.addItems([T("layer_1"), T("layer_2")])
-        self.layer_box.currentIndexChanged.connect(self.refresh)
-        r.addWidget(self.layer_box)
         r.addStretch()
         card.layout_.addLayout(r)
         grid = QGridLayout()
@@ -1293,9 +1284,8 @@ class StatsPage(Page):
         if stats is None:
             return
         days = self.RANGES[self.range_box.currentIndex()][1]
-        layer2 = self.layer_box.currentIndex() == 1
-        counts = stats.totals(days, layer2)
-        layout = self.draft["keys2" if layer2 else "keys"]
+        counts = [a + b for a, b in zip(stats.totals(days), stats.totals(days, layer2=True))]
+        layout = self.draft["keys"]
         names = config.action_names(self.draft)
         top = max(counts) or 1
         lang = language()

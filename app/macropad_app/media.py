@@ -142,6 +142,25 @@ class AppVolume:
             log.info("Could not mute: %s", e)
             self._sessions = []
 
+    def level(self):
+        """The app's slider in the Windows volume mixer, 0.0-1.0 (None if not found)."""
+        try:
+            for v, _ in self._find():
+                return float(v.GetMasterVolume())
+        except Exception:
+            self._sessions = []
+        return None
+
+    def set_level(self, level, unmute=False):
+        try:
+            for v, _ in self._find():
+                v.SetMasterVolume(min(1.0, max(0.0, level)), None)
+                if unmute and v.GetMute():
+                    v.SetMute(0, None)
+        except Exception as e:
+            log.info("Could not change volume: %s", e)
+            self._sessions = []
+
     def peak(self):
         """Current loudness of the app, 0.0-1.0 (0 if unknown)."""
         try:
@@ -270,6 +289,47 @@ class MicVolume:
             self._ep = None
 
 
+class HeardVolume:
+    """The music app's volume as you hear it: the Windows volume times the app's
+    own slider in the volume mixer (which usually stays at 100 %). The knob
+    changes the app's slider in even steps of what you hear, never above the
+    Windows volume - so other programs are not touched."""
+
+    def __init__(self, app, master):
+        self.app = app
+        self.master = master
+
+    def get(self):
+        level = self.app.level()
+        if level is None:
+            return -1, False
+        _, app_muted = self.app.get()
+        m = self.master.scalar()
+        if m is None:
+            return round(level * 100), app_muted
+        _, master_muted = self.master.get()
+        return round(level * m * 100), app_muted or master_muted
+
+    def change(self, clicks):
+        level = self.app.level()
+        if level is None:
+            return
+        m = self.master.scalar()
+        if not m or m < 0.005:                 # Windows volume at 0: plain steps on the app's slider
+            self.app.change(clicks)
+            return
+        heard = level * m + clicks * VOL_STEP
+        heard = min(m, max(0.0, round(heard / VOL_STEP) * VOL_STEP))
+        self.app.set_level(heard / m, unmute=clicks > 0)
+        log.info("%s volume %d %% (heard)", self.app.exe, round(heard * 100))
+
+    def toggle_mute(self):
+        self.app.toggle_mute()
+
+    def peak(self):
+        return self.app.peak()
+
+
 class MasterVolume:
     """The whole PC's volume: the Windows volume slider of the current output
     (speakers, headphones ...). Same get / change / toggle_mute as AppVolume."""
@@ -294,6 +354,15 @@ class MasterVolume:
                 log.info("No sound output found: %s", e)
                 self._ep = None
         return self._ep
+
+    def scalar(self):
+        """The Windows volume 0.0-1.0, None if unknown."""
+        try:
+            ep = self._endpoint()
+            return None if ep is None else float(ep.GetMasterVolumeLevelScalar())
+        except Exception:
+            self._ep = None
+            return None
 
     def get(self):
         try:
@@ -377,6 +446,7 @@ class MusicApp:
         self.learned = load_learned()        # media id -> player key
         self.volumes = {k: AppVolume(PLAYERS[k][2]) for k in allowed}
         self.master_volume = MasterVolume()
+        self.heard = {k: HeardVolume(v, self.master_volume) for k, v in self.volumes.items()}
         self.app_volume = app_volume         # knob: the music app's volume (True) or the PC's
 
     @property
@@ -387,7 +457,7 @@ class MusicApp:
     @property
     def control(self):
         """What the knob turns and the pad shows: the PC volume, or the app's."""
-        return self.volumes[self.key] if self.app_volume else self.master_volume
+        return self.heard[self.key] if self.app_volume else self.master_volume
 
     def _player_of(self, app_id):
         """Player key for a media id, or None if it is not one of our music apps."""

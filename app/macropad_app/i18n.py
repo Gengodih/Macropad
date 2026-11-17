@@ -68,8 +68,12 @@ TEXTS = {
     "knob_turn": ("Turn: volume", "Drehen: Lautstärke"),
     "knob_pc": ("PC", "PC"),
     "knob_app": ("Music app", "Music App"),
-    "knob_note": ("Without the app running, the knob always controls the Windows volume.",
-                  "Ohne laufende App steuert der Knopf immer die Windows-Lautstärke."),
+    "knob_note": ("Music app: the knob only changes the music app, and the pad shows what you hear from it "
+                  "(Windows volume × the app's level in the volume mixer). Spotify's own volume slider cannot be "
+                  "read by other programs. Without the app running, the knob always controls the Windows volume.",
+                  "Music App: Der Drehknopf ändert nur die Musik-App, und das Pad zeigt, was du von ihr hörst "
+                  "(Windows-Lautstärke × Stufe der App im Lautstärkemixer). Den eigenen Lautstärkeregler von Spotify "
+                  "können andere Programme nicht lesen. Ohne laufende App steuert der Drehknopf immer die Windows-Lautstärke."),
     "fallback_note": ("Only while the app runs. Without the app this key is the {what} again.",
                       "Nur solange die App läuft. Ohne App ist diese Taste wieder die {what}."),
     "what_lights": ("light key", "Licht-Taste"),
@@ -347,7 +351,7 @@ TEXTS = {
     "admin_needed": ("This needs administrator rights - Windows will ask you.",
                      "Dafür sind Administratorrechte nötig - Windows fragt dich gleich."),
 
-    # --- 1.4: macros, profiles, layer 2, sleep, backup, statistics ---
+    # --- 1.4: macros, profiles, sleep, backup, statistics ---
     'menu_stats': ('Statistics', 'Statistik'),
     'cat_app': ('Macros & more', 'Makros & mehr'),
     'macro_item': ('Macro: {name}', 'Makro: {name}'),
@@ -356,7 +360,6 @@ TEXTS = {
     'new_open': ('Open a program or website…', 'Programm oder Webseite öffnen…'),
     'new_text': ('Type a text…', 'Text schreiben…'),
     'new_multi': ('New tap / hold key…', 'Neue Tippen-/Halten-Taste…'),
-    'desc_layer': ('While you hold this key, the other keys do their layer-2 job (set them under "Layer 2").', 'Solange du diese Taste hältst, machen die anderen Tasten ihre Ebene-2-Funktion (unter "Ebene 2" einstellen).'),
     'desc_mic': ('Switches your microphone on and off (for Discord, Teams, games …). The key glows red while it is off, green while it is on.', 'Schaltet dein Mikrofon an und aus (für Discord, Teams, Spiele …). Die Taste leuchtet rot, solange es aus ist, grün, solange es an ist.'),
     'desc_macro': ('Several steps in a row: keys, text, open a program, pauses. Needs the app running.', 'Mehrere Schritte nacheinander: Tasten, Text, Programm öffnen, Pausen. Braucht die laufende App.'),
     'desc_open': ('Opens a program, file, folder or website. Needs the app running.', 'Öffnet ein Programm, eine Datei, einen Ordner oder eine Webseite. Braucht die laufende App.'),
@@ -411,10 +414,6 @@ TEXTS = {
     'profile_for': ('Used while one of these is in front: {programs}. Keys you do not change here do the same as in the normal layout.', 'Gilt, solange eins davon vorne ist: {programs}. Tasten, die du hier nicht änderst, machen dasselbe wie in der normalen Belegung.'),
     'profile_active': ('Profile in use right now: {name}', 'Gerade aktives Profil: {name}'),
     'profile_none_active': ('Profiles change the keys by themselves while a certain program is in front (e.g. Photoshop or a game).', 'Profile ändern die Tasten von selbst, solange ein bestimmtes Programm vorne ist (z. B. Photoshop oder ein Spiel).'),
-    'layer_1': ('Layer 1', 'Ebene 1'),
-    'layer_2': ('Layer 2 (while holding the layer key)', 'Ebene 2 (während die Ebenen-Taste gehalten wird)'),
-    'layer_note': ('Hold your layer key and press another key to use its layer-2 job. Works without the app too.', 'Halte deine Ebenen-Taste und drücke eine andere Taste für ihre Ebene-2-Funktion. Klappt auch ohne App.'),
-    'layer_need_key': ('For layer 2, give one key the job "Layer 2 (hold)" (under Macros & more).', 'Für Ebene 2 gib einer Taste die Funktion "Ebene 2 (halten)" (unter Makros & mehr).'),
     'sub_macro': ('Macro', 'Makro'),
     'sub_multi': ('Tap / hold', 'Tippen / Halten'),
     'sub_app': ('App', 'App'),
@@ -482,6 +481,11 @@ TEXTS = {
     'pic_not_sent': ('The picture was not sent: {why}', 'Das Bild wurde nicht gesendet: {why}'),
     'timer_break_now': ('Time for a break!', 'Zeit für eine Pause!'),
     'timer_focus_now': ('Break over – back to focus.', 'Pause vorbei – zurück zum Fokus.'),
+    # --- 1.6 ---
+    'whats_new': ("What's new", 'Was ist neu'),
+    'notes_available': ('– available now', '– jetzt verfügbar'),
+    'notes_installed': ('– installed', '– installiert'),
+    'notes_none': ('No notes for this version.', 'Keine Notizen zu dieser Version.'),
 }
 
 

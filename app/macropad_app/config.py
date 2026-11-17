@@ -66,7 +66,6 @@ DEFAULTS = {
     "app_language": "en",
     "pad_language": "en",
     "keys": list(keys.DEFAULT_LAYOUT),
-    "keys2": ["none"] * keys.KEY_COUNT,   # layer 2 (while a "layer" key is held)
     # own macros: id -> {"name": str, "steps": [{"type": "keys", "action": id} |
     #   {"type": "text", "text": str} | {"type": "open", "target": str} | {"type": "delay", "ms": int}]}
     "macros": {},
@@ -249,14 +248,12 @@ def validate(raw) -> dict:
         if m:
             d["multi"][rid] = m
 
-    def layout(value, fallback, allow_layer=True):
+    def layout(value, fallback):
         if not (isinstance(value, list) and len(value) == keys.KEY_COUNT):
             return list(fallback)
-        return [a if action_ok(d, a) and (allow_layer or a not in ("layer", "lights", "fun2")) else fallback[i]
-                for i, a in enumerate(value)]
+        return [a if action_ok(d, a) else fallback[i] for i, a in enumerate(value)]
 
     d["keys"] = layout(raw.get("keys"), keys.DEFAULT_LAYOUT)
-    d["keys2"] = layout(raw.get("keys2"), d["keys2"], allow_layer=False)
     profiles = raw.get("profiles") if isinstance(raw.get("profiles"), list) else []
     for p in profiles[:MAX_PROFILES]:
         if not isinstance(p, dict):
