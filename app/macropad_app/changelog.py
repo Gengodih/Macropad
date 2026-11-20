@@ -2,6 +2,12 @@
 and put into the release, so the app can show what an update brings."""
 
 CHANGES = {
+    "1.6.2": {
+        "en": ["Pad firmware 2.3.2: the key lights no longer flash in wrong colours now and then "
+               "(please flash it once under Pad firmware)"],
+        "de": ["Pad-Firmware 2.3.2: Die Tastenbeleuchtung blitzt nicht mehr ab und zu in falschen Farben "
+               "(bitte einmal unter Pad-Firmware flashen)"],
+    },
     "1.6.1": {
         "en": ["Pad firmware 2.3.1: the screen now always comes back after the PC was shut down or asleep "
                "(please flash it once under Pad firmware)",

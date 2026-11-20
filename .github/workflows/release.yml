@@ -23,6 +23,7 @@ permissions:
 jobs:
   firmware:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -58,6 +59,7 @@ jobs:
   windows:
     needs: firmware
     runs-on: windows-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -87,6 +89,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt pyinstaller
       - name: Tests
+        timeout-minutes: 12
+        env:
+          QT_QPA_PLATFORM: offscreen
         run: python -m unittest discover -s tests -v
       - name: Build app
         shell: bash
@@ -98,7 +103,8 @@ jobs:
       - name: Check that the built app starts
         shell: pwsh
         run: |
-          $p = Start-Process -FilePath dist\MacroPad\MacroPad.exe -ArgumentList "--selftest" -Wait -PassThru
+          $p = Start-Process -FilePath dist\MacroPad\MacroPad.exe -ArgumentList "--selftest" -PassThru
+          if (-not $p.WaitForExit(180000)) { $p.Kill(); Write-Error "MacroPad.exe --selftest hangs"; exit 1 }
           if ($p.ExitCode -ne 0) { Write-Error "MacroPad.exe --selftest failed (exit $($p.ExitCode))"; exit 1 }
       - name: Build installer
         shell: pwsh

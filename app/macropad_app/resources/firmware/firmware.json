@@ -1,5 +1,5 @@
 {
-  "version": "2.3.1",
+  "version": "2.3.2",
   "chip": "esp32s3",
   "parts": [
     {
@@ -20,7 +20,7 @@
     {
       "offset": "0x10000",
       "file": "app.bin",
-      "sha256": "d25dae58bb2fe15ee960b45185c68654d14070697d97e845bf19bfb02145b853"
+      "sha256": "1a1b4354e87c1b9bd90b96316b55484ccf4265db8886abb6bc66eed2f8251a68"
     }
   ]
 }

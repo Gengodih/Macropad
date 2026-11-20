@@ -7,6 +7,11 @@ import tempfile
 import threading
 import time
 import unittest
+import faulthandler
+
+# If a test ever hangs (e.g. on the build machine), print where every thread is
+# stuck and stop, instead of waiting until GitHub gives up after hours.
+faulthandler.dump_traceback_later(480, exit=True)
 from pathlib import Path
 from unittest import mock
 

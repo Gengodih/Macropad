@@ -63,9 +63,11 @@
 #include <esp_heap_caps.h>
 #include "esp32-hal-tinyusb.h"   // usb_persist_restart(): reboot into flash mode for updates
 #include <esp_partition.h>       // own picture: kept in the flash area after the app
+#include "driver/rmt_tx.h"       // LED data by DMA (see ledShow)
+#include "driver/rmt_encoder.h"
 
 // Firmware version, reported to the Macro Pad app (Update & Repair compares it).
-const char FW_VERSION[] = "2.3.1";
+const char FW_VERSION[] = "2.3.2";
 const uint8_t PROTO_VERSION = 4;   // settings messages understood by this firmware (2: backgrounds, 3: app keys, 4: widgets)
 #include "Aquarium.h"   // the aquarium scene (second file in this sketch folder)
 #include "Backgrounds.h"   // the other animated backgrounds
@@ -226,7 +228,15 @@ class FastCanvas : public Arduino_Canvas {
 FastCanvas *gfx = new FastCanvas(320, 170, panel);
 
 // SK6812MINI-E LEDs use GRB colour order, like WS2812 "NeoPixels".
-Adafruit_NeoPixel strip(LED_COUNT, PIN_LED, NEO_GRB + NEO_KHZ800);
+Adafruit_NeoPixel strip(LED_COUNT, PIN_LED, NEO_GRB + NEO_KHZ800);   // only its colour buffer is used
+
+// LED data goes out through the RMT unit with DMA: the hardware sends the whole
+// frame by itself. (The library's own show() refills a tiny buffer from an
+// interrupt; when the screen or USB delayed that, the LEDs got garbled bits
+// and flashed in wrong colours for a moment.)
+rmt_channel_handle_t ledChannel = nullptr;
+rmt_encoder_handle_t ledEncoder = nullptr;
+
 Preferences prefs;   // remembers light mode and brightness in flash
 
 // Screen colour from red, green, blue (0-255). A macro on purpose: the Arduino
@@ -1400,7 +1410,7 @@ void handleAppLine(char *line) {
     // shows up as a new COM port. Settings in flash are kept.
     setToast(tr(T_UPDATE), C_RED, C_TEXT);
     strip.clear();
-    strip.show();
+    ledShow();
     Serial.flush();
     delay(200);
     usb_persist_restart(RESTART_BOOTLOADER);
@@ -2033,6 +2043,48 @@ uint32_t lightColor(float x, float y, int key, uint32_t now) {
   }
 }
 
+void ledBegin() {
+  rmt_tx_channel_config_t cfg = {};
+  cfg.gpio_num = (gpio_num_t)PIN_LED;
+  cfg.clk_src = RMT_CLK_SRC_DEFAULT;
+  cfg.resolution_hz = 10000000;            // 0.1 us steps
+  cfg.mem_block_symbols = 1024;            // with DMA: room for the whole frame
+  cfg.trans_queue_depth = 2;
+  cfg.flags.with_dma = true;
+  if (rmt_new_tx_channel(&cfg, &ledChannel) != ESP_OK) {
+    cfg.flags.with_dma = false;            // no DMA channel free: the biggest plain buffer
+    cfg.mem_block_symbols = 192;
+    if (rmt_new_tx_channel(&cfg, &ledChannel) != ESP_OK) {
+      ledChannel = nullptr;
+      return;
+    }
+  }
+  rmt_bytes_encoder_config_t enc = {};
+  enc.bit0.level0 = 1;                     // 0 bit: 0.4 us high, 0.8 us low
+  enc.bit0.duration0 = 4;
+  enc.bit0.level1 = 0;
+  enc.bit0.duration1 = 8;
+  enc.bit1.level0 = 1;                     // 1 bit: 0.8 us high, 0.4 us low
+  enc.bit1.duration0 = 8;
+  enc.bit1.level1 = 0;
+  enc.bit1.duration1 = 4;
+  enc.flags.msb_first = 1;
+  if (rmt_new_bytes_encoder(&enc, &ledEncoder) != ESP_OK || rmt_enable(ledChannel) != ESP_OK) {
+    if (ledEncoder) rmt_del_encoder(ledEncoder);
+    rmt_del_channel(ledChannel);
+    ledChannel = nullptr;
+    ledEncoder = nullptr;
+  }
+}
+
+// Sends the colour buffer (GRB bytes, already scaled) to the LED chain
+void ledShow() {
+  if (!ledChannel || !ledEncoder) return;
+  rmt_transmit_config_t tx = {};
+  if (rmt_transmit(ledChannel, ledEncoder, strip.getPixels(), strip.numPixels() * 3, &tx) == ESP_OK)
+    rmt_tx_wait_all_done(ledChannel, 20);
+}
+
 // Send a frame to the LEDs, dimmed as a whole if it would draw more than
 // LED_BUDGET_MA (only white or very bright frames at high brightness).
 void showLimited(const uint32_t *frame) {
@@ -2047,7 +2099,7 @@ void showLimited(const uint32_t *frame) {
     uint8_t b = (frame[i] & 0xFF) * scale;
     strip.setPixelColor(i, r, g, b);
   }
-  strip.show();
+  ledShow();
 }
 
 // Mix two LED colours, m = 0..1
@@ -2175,7 +2227,8 @@ void setup() {
   setBacklight(backlightFor(brightnessIdx));
   strip.begin();
   strip.clear();
-  strip.show();
+  ledBegin();
+  ledShow();
   startAquarium();
   // start-up show: runs alongside everything else from here on
   introStart = millis();
