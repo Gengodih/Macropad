@@ -2,6 +2,14 @@
 and put into the release, so the app can show what an update brings."""
 
 CHANGES = {
+    "1.6.1": {
+        "en": ["Pad firmware 2.3.1: the screen now always comes back after the PC was shut down or asleep "
+               "(please flash it once under Pad firmware)",
+               "A key press turns the pad's screen on for a minute, even while the PC sleeps"],
+        "de": ["Pad-Firmware 2.3.1: Das Display geht jetzt immer wieder an, nachdem der PC aus war oder geschlafen hat "
+               "(bitte einmal unter Pad-Firmware flashen)",
+               "Ein Tastendruck schaltet das Display für eine Minute ein, auch wenn der PC schläft"],
+    },
     "1.6.0": {
         "en": ["Music app volume: the pad now shows what you hear (Windows volume × the app's level)",
                "Layer 2 removed",

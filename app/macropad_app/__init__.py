@@ -1,6 +1,6 @@
 """Macro Pad app: settings, music info and updates for the ESP32 macro pad."""
 
-VERSION = "1.6.0"
+VERSION = "1.6.1"
 
 # The GitHub repository that holds the releases ("owner/name"). Filled in by the
 # build (GitHub Actions writes _build_info.py); empty = update check is off.

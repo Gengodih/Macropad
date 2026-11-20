@@ -65,7 +65,7 @@
 #include <esp_partition.h>       // own picture: kept in the flash area after the app
 
 // Firmware version, reported to the Macro Pad app (Update & Repair compares it).
-const char FW_VERSION[] = "2.3.0";
+const char FW_VERSION[] = "2.3.1";
 const uint8_t PROTO_VERSION = 4;   // settings messages understood by this firmware (2: backgrounds, 3: app keys, 4: widgets)
 #include "Aquarium.h"   // the aquarium scene (second file in this sketch folder)
 #include "Backgrounds.h"   // the other animated backgrounds
@@ -265,7 +265,6 @@ uint8_t highlightRGB[KEY_COUNT][3];
 uint8_t idleMinutes = 0;                 // 0 = never (from the app)
 uint32_t lastActivity = 0;
 bool pcLocked = false;                   // from the app
-volatile bool usbSuspended = false;      // the PC put USB to sleep
 volatile bool padAsleep = false;
 Button encButton, bootButton, io14Button;
 
@@ -1719,17 +1718,15 @@ bool drawScreen(uint32_t now) {
 // Sleep while the PC is locked / asleep, or after idleMinutes without a key
 void updateSleep(uint32_t now) {
   bool idle = idleMinutes && msSince(now, lastActivity) > (int32_t)(idleMinutes * 60000UL);
-  bool sleep = !introActive(now) && (usbSuspended || (pcLocked && helperAlive(now)) || idle);
+  // USB asleep = the PC is off or asleep but still powers the port. Asked every time
+  // (not from events: after a restart of the PC there is no "resume", just a new start).
+  // A key press shows the screen for a minute even then.
+  bool usbAsleep = tud_suspended() && msSince(now, lastActivity) > 60000;
+  bool sleep = !introActive(now) && (usbAsleep || (pcLocked && helperAlive(now)) || idle);
   if (sleep == padAsleep) return;
   padAsleep = sleep;
   setBacklight(sleep ? 0 : backlightFor(brightnessIdx));
   dirty = true;
-}
-
-void usbEvent(void *, esp_event_base_t base, int32_t id, void *) {
-  if (base != ARDUINO_USB_EVENTS) return;
-  if (id == ARDUINO_USB_SUSPEND_EVENT) usbSuspended = true;
-  else if (id == ARDUINO_USB_RESUME_EVENT) usbSuspended = false;
 }
 
 void updateScreen(uint32_t now) {
@@ -2133,7 +2130,6 @@ void setup() {
   ConsumerControl.begin();
   USB.productName("ESP32 Macro Pad");
   USB.manufacturerName("DIY");
-  USB.onEvent(usbEvent);
   USB.begin();
 
   initMatrix();
